@@ -1,0 +1,62 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGION: asia-northeast3
+  SERVICE_NAME: jeju-backend
+  REPOSITORY_ID: jeju-backend
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Artifact Registry 저장소 확인/생성
+        run: |
+          gcloud artifacts repositories describe "$REPOSITORY_ID" \
+            --project="${{ secrets.GCP_PROJECT_ID }}" --location="$REGION" >/dev/null 2>&1 || \
+          gcloud artifacts repositories create "$REPOSITORY_ID" \
+            --project="${{ secrets.GCP_PROJECT_ID }}" --location="$REGION" \
+            --repository-format=docker
+
+      - name: Docker 인증 설정
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: 이미지 빌드/푸시
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${REPOSITORY_ID}/${SERVICE_NAME}:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Cloud Run 배포
+        run: |
+          gcloud run deploy "$SERVICE_NAME" \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --region="$REGION" \
+            --image="$IMAGE" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=8080 \
+            --cpu=4 \
+            --memory=4Gi \
+            --timeout=300 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --cpu-boost
