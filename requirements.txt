@@ -3,8 +3,13 @@ uvicorn[standard]
 python-multipart
 librosa
 transformers
-peft
-google-cloud-aiplatform
+peft==0.19.1
+google-genai==2.13.0
+google-cloud-storage
+soundfile
+Cython==0.29.36
 
+# Keep current API server CPU deployment behavior.
+# For Cloud Run GPU, replace this with an appropriate CUDA-enabled PyTorch image/install.
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch

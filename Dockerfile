@@ -2,20 +2,38 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# librosa가 webm/opus 등 압축 오디오를 디코딩하려면 ffmpeg가 필요하고,
-# soundfile 백엔드는 libsndfile1에 의존한다.
+# ffmpeg/libsndfile: uploaded web audio decoding
+# git/build-essential: pin and build upstream VITS monotonic_align runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
+    git \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# VITS architecture/runtime. The trained model artifact added by this project is
+# only G_*.pth; source is pinned here for reproducible inference.
+RUN git clone https://github.com/jaywalnut310/vits.git /opt/vits \
+    && cd /opt/vits \
+    && git checkout 2e561ba \
+    && cd /opt/vits/monotonic_align \
+    && mkdir -p monotonic_align \
+    && touch monotonic_align/__init__.py \
+    && python setup.py build_ext --inplace \
+    && rm -rf /opt/vits/.git
+
 COPY . .
 
-ENV PORT=8080
+ENV PORT=8080 \
+    VITS_ROOT=/opt/vits \
+    TTS_CONFIG_PATH=/app/tts_config/jeju_vits.json \
+    TTS_CHECKPOINT_PATH=gs://malmoi-jeju-dataset-2026/tts/jeju_vits.pth \
+    TTS_CHECKPOINT_CACHE_PATH=/tmp/jeju_vits.pth
+
 EXPOSE 8080
 
-# Cloud Run은 컨테이너 외부에서 요청을 보내므로 반드시 0.0.0.0으로 바인딩해야 한다.
+# For GPU/CPU-heavy demo inference, Cloud Run concurrency=1 is recommended.
 CMD ["sh", "-c", "uvicorn api_server:app --host 0.0.0.0 --port ${PORT}"]

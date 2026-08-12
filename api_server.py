@@ -1,99 +1,260 @@
-import torch
-import librosa
+from __future__ import annotations
+
+import asyncio
+import base64
 import os
+import tempfile
 import time
-from fastapi import FastAPI, UploadFile, File
+from pathlib import Path
+
+import librosa
+import torch
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
-from peft import PeftModel, PeftConfig
-import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig
+from fastapi.responses import Response
+from google import genai
+from google.genai import types
+from peft import PeftConfig, PeftModel
+from pydantic import BaseModel, Field
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
+
+from ars_prompt import SYSTEM_INSTRUCTION, build_few_shot_contents
+from tts_engine import JejuVITSEngine
+
 
 # ==========================================
-# 1. FastAPI 앱 및 설정
+# 1. FastAPI / environment
 # ==========================================
-app = FastAPI(title="Jeju Dialect Translator API")
+app = FastAPI(title="Jeju AI ARS API", version="2.0.0")
 
-# 프론트엔드(웹)에서 API를 호출할 수 있도록 CORS 허용
+cors_origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "*").split(",") if x.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # 실제 서비스 시에는 웹 도메인으로 제한
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials="*" not in cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-LORA_MODEL_PATH = "./whisper-jeju-lora-final"
-GCP_PROJECT_ID = "385248657749"
-GCP_LOCATION = "asia-northeast3"
-ENDPOINT_PATH = "projects/385248657749/locations/us-central1/endpoints/7571681821318971392"
+LORA_MODEL_PATH = os.getenv("LORA_MODEL_PATH", "./whisper-jeju-lora-final")
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "385248657749")
+GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
+GEMINI_TUNED_ENDPOINT = os.getenv(
+    "GEMINI_TUNED_ENDPOINT",
+    "projects/385248657749/locations/us-central1/endpoints/7571681821318971392",
+)
+
+TTS_CONFIG_PATH = os.getenv("TTS_CONFIG_PATH", "./tts_config/jeju_vits.json")
+TTS_CHECKPOINT_PATH = os.getenv(
+    "TTS_CHECKPOINT_PATH",
+    "gs://malmoi-jeju-dataset-2026/tts/jeju_vits.pth",
+)
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+INFERENCE_LOCK = asyncio.Lock()
+
+
+class GeminiARSResult(BaseModel):
+    standard_text: str = Field(description="입력 제주어를 자연스러운 표준어로 번역한 결과")
+    ars_reply_jeju: str = Field(description="Demo 시나리오를 참고해 생성한 제주어 AI ARS 답변")
+
+
+class TTSRequest(BaseModel):
+    text: str
+
 
 # ==========================================
-# 2. 모델 로드 (서버 가동 시 1회만 실행)
+# 2. Models: load once at process startup
 # ==========================================
-print("서버 구동 준비: 모델을 메모리에 적재합니다...")
-config = PeftConfig.from_pretrained(LORA_MODEL_PATH)
-base_model_name = config.base_model_name_or_path
+print(f"서버 구동 준비: STT 모델 적재 중... device={DEVICE}")
+stt_config = PeftConfig.from_pretrained(LORA_MODEL_PATH)
+base_model_name = stt_config.base_model_name_or_path
 processor = WhisperProcessor.from_pretrained(base_model_name)
 base_model = WhisperForConditionalGeneration.from_pretrained(base_model_name)
 stt_model = PeftModel.from_pretrained(base_model, LORA_MODEL_PATH).to(DEVICE).eval()
 
-vertexai.init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
-system_prompt = (
-    "당신은 제주 방언을 표준어로 정확하게 번역하는 전문 번역가입니다. "
-    "사용자가 제주어 텍스트를 입력하면, 부연 설명 없이 오직 '표준어로 번역된 결과'만 텍스트로 출력하세요."
+print("Gemini client 준비 중...")
+gemini_client = genai.Client(
+    vertexai=True,
+    project=GCP_PROJECT_ID,
+    location=GCP_LOCATION,
+    http_options=types.HttpOptions(api_version="v1"),
 )
-translator_model = GenerativeModel(model_name=ENDPOINT_PATH, system_instruction=[system_prompt])
-generation_config = GenerationConfig(temperature=0.1, top_p=0.8, max_output_tokens=512)
-print("✅ 모델 적재 완료!")
+
+print("Jeju VITS TTS 모델 적재 중...")
+tts_model = None
+_tts_error = None
+try:
+    tts_model = JejuVITSEngine(
+        config_path=TTS_CONFIG_PATH,
+        checkpoint_path=TTS_CHECKPOINT_PATH,
+        device=DEVICE,
+    )
+except Exception as exc:  # Keep server diagnosable before checkpoint is copied.
+    _tts_error = str(exc)
+    print(f"⚠️ TTS 비활성화: {_tts_error}")
+
+print("✅ 모델 적재 단계 완료")
+
 
 # ==========================================
-# 3. API 엔드포인트 구현
+# 3. Pipeline helpers
 # ==========================================
+def transcribe_jeju(audio_path: str) -> str:
+    speech_array, sampling_rate = librosa.load(audio_path, sr=16000)
+    inputs = processor(
+        speech_array,
+        sampling_rate=sampling_rate,
+        return_tensors="pt",
+    ).to(DEVICE)
+
+    with torch.inference_mode():
+        predicted_ids = stt_model.generate(
+            **inputs,
+            language="ko",
+            task="transcribe",
+        )
+
+    return processor.batch_decode(
+        predicted_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0].strip()
+
+
+def call_gemini_ars(jeju_text: str) -> GeminiARSResult:
+    response = gemini_client.models.generate_content(
+        model=GEMINI_TUNED_ENDPOINT,
+        contents=build_few_shot_contents(jeju_text),
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.15,
+            top_p=0.8,
+            max_output_tokens=512,
+            response_mime_type="application/json",
+            response_schema=GeminiARSResult,
+        ),
+    )
+
+    if response.parsed is not None:
+        if isinstance(response.parsed, GeminiARSResult):
+            return response.parsed
+        return GeminiARSResult.model_validate(response.parsed)
+
+    if not response.text:
+        raise RuntimeError("Gemini가 빈 응답을 반환했습니다.")
+    return GeminiARSResult.model_validate_json(response.text)
+
+
+def synthesize_ars_reply(text: str) -> bytes:
+    if tts_model is None:
+        raise RuntimeError(_tts_error or "TTS 모델이 초기화되지 않았습니다.")
+
+    return tts_model.synthesize_wav(
+        text,
+        max_chars=int(os.getenv("TTS_MAX_CHARS", "45")),
+        pause_ms=int(os.getenv("TTS_PAUSE_MS", "220")),
+        tail_silence_ms=int(os.getenv("TTS_TAIL_SILENCE_MS", "350")),
+        length_scale=float(os.getenv("TTS_LENGTH_SCALE", "1.10")),
+        noise_scale=float(os.getenv("TTS_NOISE_SCALE", "0.667")),
+        noise_scale_w=float(os.getenv("TTS_NOISE_SCALE_W", "0.35")),
+    )
+
+
+# ==========================================
+# 4. Endpoints
+# ==========================================
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "device": DEVICE,
+        "stt_loaded": True,
+        "gemini_model": GEMINI_TUNED_ENDPOINT,
+        "tts_loaded": tts_model is not None,
+        "tts_checkpoint": TTS_CHECKPOINT_PATH,
+        "tts_error": _tts_error,
+    }
+
+
 @app.post("/translate")
 async def translate_audio(file: UploadFile = File(...)):
-    """웹에서 전달받은 음성 파일을 처리하여 JSON으로 반환"""
+    """Single-call AI ARS pipeline.
+
+    Web audio -> Whisper Jeju STT -> tuned Gemini -> Jeju VITS -> JSON.
+
+    WAV bytes are base64-encoded because a single HTTP body cannot normally be
+    both a JSON document and a raw WAV file at the same time. Frontend can turn
+    audio_base64 back into a Blob(audio/wav) and play it immediately.
+    """
     start_time = time.time()
-    
-    # 1. 업로드된 파일을 임시 저장
-    temp_file_path = f"temp_{file.filename}"
-    with open(temp_file_path, "wb") as buffer:
-        buffer.write(await file.read())
-    
+    suffix = Path(file.filename or "input.wav").suffix or ".wav"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        temp_file_path = tmp.name
+
     try:
-        # 2. STT (음성 -> 제주어)
-        speech_array, sampling_rate = librosa.load(temp_file_path, sr=16000)
-        inputs = processor(speech_array, sampling_rate=sampling_rate, return_tensors="pt").to(DEVICE)
-        
-        with torch.no_grad():
-            predicted_ids = stt_model.generate(
-                **inputs,
-                language="ko",
-                task="transcribe"
+        # Model objects share CPU/GPU memory. Serialize demo requests to avoid
+        # concurrent inference spikes on a single Cloud Run instance.
+        async with INFERENCE_LOCK:
+            jeju_text = await asyncio.to_thread(transcribe_jeju, temp_file_path)
+            if not jeju_text:
+                raise HTTPException(status_code=422, detail="STT 결과가 비어 있습니다.")
+
+            gemini_result = await asyncio.to_thread(call_gemini_ars, jeju_text)
+
+            if tts_model is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"TTS 모델이 준비되지 않았습니다: {_tts_error}",
+                )
+
+            wav_bytes = await asyncio.to_thread(
+                synthesize_ars_reply,
+                gemini_result.ars_reply_jeju,
             )
-            
-        jeju_text = processor.batch_decode(
-            predicted_ids, 
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False
-        )[0].strip()
-        
-        # 3. LLM (제주어 -> 표준어)
-        response = translator_model.generate_content(jeju_text, generation_config=generation_config)
-        standard_text = response.text.strip()
-        
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI ARS 처리 실패: {exc}") from exc
     finally:
-        # 처리가 끝난 후 임시 파일 삭제
-        if os.path.exists(temp_file_path):
+        try:
             os.remove(temp_file_path)
-            
+        except FileNotFoundError:
+            pass
+
     end_time = time.time()
-    
-    # 4. JSON 형태로 프론트엔드에 응답
     return {
         "status": "success",
         "jeju_text": jeju_text,
-        "standard_text": standard_text,
-        "processing_time": round(end_time - start_time, 2)
+        "standard_text": gemini_result.standard_text,
+        "ars_reply_text": gemini_result.ars_reply_jeju,
+        "audio_mime_type": "audio/wav",
+        "audio_filename": "ars_reply.wav",
+        "audio_sample_rate": tts_model.sample_rate if tts_model else 22050,
+        "audio_base64": base64.b64encode(wav_bytes).decode("ascii"),
+        "processing_time": round(end_time - start_time, 2),
     }
+
+
+@app.post("/tts")
+async def tts_only(request: TTSRequest):
+    """Optional raw-WAV endpoint for debugging/frontend reuse."""
+    if tts_model is None:
+        raise HTTPException(status_code=503, detail=f"TTS 모델 미준비: {_tts_error}")
+    if not request.text.strip():
+        raise HTTPException(status_code=422, detail="text가 비어 있습니다.")
+
+    async with INFERENCE_LOCK:
+        try:
+            wav_bytes = await asyncio.to_thread(synthesize_ars_reply, request.text.strip())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"TTS 생성 실패: {exc}") from exc
+
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={"Content-Disposition": 'inline; filename="jeju_tts.wav"'},
+    )
