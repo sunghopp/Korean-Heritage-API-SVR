@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import tempfile
 import time
@@ -19,7 +20,10 @@ from pydantic import BaseModel, Field
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 from ars_prompt import SYSTEM_INSTRUCTION, build_few_shot_contents
+from dataset_logger import save_training_sample
 from tts_engine import JejuVITSEngine
+
+logger = logging.getLogger(__name__)
 
 
 # ==========================================
@@ -203,6 +207,16 @@ async def translate_audio(file: UploadFile = File(...)):
                 raise HTTPException(status_code=422, detail="STT 결과가 비어 있습니다.")
 
             gemini_result = await asyncio.to_thread(call_gemini_ars, jeju_text)
+
+            try:
+                await asyncio.to_thread(
+                    save_training_sample,
+                    audio_path=temp_file_path,
+                    jeju_text=jeju_text,
+                    standard_text=gemini_result.standard_text,
+                )
+            except Exception:
+                logger.warning("데이터셋 저장 호출 실패", exc_info=True)
 
             if tts_model is None:
                 raise HTTPException(
