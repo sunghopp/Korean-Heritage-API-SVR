@@ -249,3 +249,24 @@ TTS_CHECKPOINT_CACHE_PATH=/tmp/jeju_vits.pth
 Cloud Run에서 사용하는 런타임 서비스 계정에는 버킷의 해당 객체를 읽을 수 있는 권한(`storage.objects.get`, 일반적으로 Storage Object Viewer 역할)이 필요합니다.
 
 STT LoRA 로딩 방식은 이번 변경에서 수정하지 않았습니다.
+
+## 학습 데이터셋 자동 저장: Google Cloud Storage 업로드
+
+`POST /translate` 요청마다 사용자 발화 음성과 STT/번역 결과를 이후 모델 재학습용 데이터셋으로 GCS에 적재합니다 (`dataset_logger.py`).
+
+```text
+gs://malmoi-jeju-dataset-2026/dataset/extracted/Audio/{id}.wav
+gs://malmoi-jeju-dataset-2026/dataset/extracted/Text/{id}.jsonl
+```
+
+`{id}`는 요청마다 새로 생성되는 타임스탬프+랜덤 hex 키이며, 오디오/라벨 파일이 1:1로 짝지어집니다. 라벨 파일은 한 줄짜리 JSON(jsonl)으로, 참조 데이터셋(`extracted/extracted/Text/Text/Label/*.json`)의 `utterance` 레벨 필드명(`form`, `standard_form`, `dialect_form`, `speaker_id`, `note`)을 재사용합니다.
+
+기본 환경변수:
+
+```bash
+DATASET_BUCKET=malmoi-jeju-dataset-2026
+DATASET_AUDIO_PREFIX=dataset/extracted/Audio
+DATASET_TEXT_PREFIX=dataset/extracted/Text
+```
+
+이 저장은 부가 기능(best-effort)입니다 — 업로드가 실패해도 `/translate` 응답(STT/Gemini/TTS 결과)에는 영향을 주지 않고 서버 로그에 warning만 남습니다.
