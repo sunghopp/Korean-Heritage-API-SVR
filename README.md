@@ -271,4 +271,4 @@ DATASET_TEXT_PREFIX=dataset/extracted/Text
 
 이 저장은 부가 기능(best-effort)입니다 — 업로드가 실패해도 `/translate` 응답(STT/Gemini/TTS 결과)에는 영향을 주지 않고 서버 로그에 warning만 남습니다.
 
-**주의:** 위 TTS 체크포인트 로딩과 달리 이 기능은 버킷에 **쓰기** 권한이 필요합니다. Cloud Run 런타임 서비스 계정에 `storage.objects.create` (예: Storage Object Creator 역할 이상)을 추가로 부여해야 하며, 현재 Terraform에는 이 IAM 바인딩이 포함되어 있지 않으므로 별도로 부여해야 합니다.
+위 TTS 체크포인트 로딩과 달리 이 기능은 버킷에 **쓰기** 권한이 필요합니다. Cloud Run 런타임 서비스 계정(`385248657749-compute@developer.gserviceaccount.com`, 기본 Compute Engine SA)은 `gs://malmoi-jeju-dataset-2026` 버킷 레벨 IAM에 이미 `roles/storage.objectAdmin`으로 등록되어 있어(`storage.objects.create` 포함) **별도 권한 부여 없이 바로 동작**합니다. (`gcloud storage buckets get-iam-policy gs://malmoi-jeju-dataset-2026`로 확인 가능.)
