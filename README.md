@@ -256,10 +256,12 @@ STT LoRA 로딩 방식은 이번 변경에서 수정하지 않았습니다.
 
 ```text
 gs://malmoi-jeju-dataset-2026/dataset/extracted/Audio/{id}.wav
-gs://malmoi-jeju-dataset-2026/dataset/extracted/Text/{id}.jsonl
+gs://malmoi-jeju-dataset-2026/dataset/extracted/Text/{id}.json
 ```
 
-`{id}`는 요청마다 새로 생성되는 타임스탬프+랜덤 hex 키이며, 오디오/라벨 파일이 1:1로 짝지어집니다. 라벨 파일은 한 줄짜리 JSON(jsonl)으로, 참조 데이터셋(`extracted/extracted/Text/Text/Label/*.json`)의 `utterance` 레벨 필드명(`form`, `standard_form`, `dialect_form`, `speaker_id`, `note`)을 재사용합니다.
+`{id}`는 요청마다 새로 생성되는 타임스탬프+랜덤 hex 키이며, 오디오/라벨 파일이 1:1로 짝지어집니다. 라벨 파일은 JSON 객체 하나로, 참조 데이터셋(`extracted/extracted/Text/Text/Label/*.json`)의 `utterance` 레벨 필드명(`form`, `standard_form`, `dialect_form`, `speaker_id`, `note`)을 재사용하고, 어절(공백 기준 단어) 단위로 쪼갠 `eojeolList`도 함께 담습니다.
+
+`eojeolList`는 `jeju_text`(방언 원문)와 `standard_text`(Gemini가 생성한 문장 전체 표준어 번역)를 각각 공백 기준으로 어절 분리한 뒤 같은 순서로 위치 매칭한 것입니다. Gemini로부터 실제 어절 단위 정렬을 받지 않기 때문에 나온 휴리스틱으로, 두 문장의 어절 수가 다르면(조사 추가/삭제 등) 부정확할 수 있습니다 — 표준어 쪽 어절이 모자라면 `standard`/`isDialect`는 `null`로 남습니다.
 
 기본 환경변수:
 

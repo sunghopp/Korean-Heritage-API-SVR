@@ -24,6 +24,30 @@ def _client() -> storage.Client:
     return _storage_client
 
 
+def _build_eojeol_list(dialect_text: str, standard_text: str) -> list[dict]:
+    """Split into whitespace-delimited eojeol and pair by position.
+
+    We don't get true word-level alignment from Gemini (only whole-sentence
+    dialect/standard text), so this positional pairing is a heuristic and can
+    misalign when the two sentences don't have the same word count.
+    """
+    dialect_words = dialect_text.split()
+    standard_words = standard_text.split()
+
+    eojeol_list = []
+    for idx, word in enumerate(dialect_words):
+        standard_word = standard_words[idx] if idx < len(standard_words) else None
+        eojeol_list.append(
+            {
+                "id": idx + 1,
+                "eojeol": word,
+                "standard": standard_word,
+                "isDialect": (word != standard_word) if standard_word is not None else None,
+            }
+        )
+    return eojeol_list
+
+
 def save_training_sample(
     *,
     audio_path: str,
@@ -51,12 +75,13 @@ def save_training_sample(
             "dialect_form": jeju_text,
             "speaker_id": speaker_id,
             "note": "",
+            "eojeolList": _build_eojeol_list(jeju_text, standard_text),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        text_blob = bucket.blob(f"{DATASET_TEXT_PREFIX}/{sample_id}.jsonl")
+        text_blob = bucket.blob(f"{DATASET_TEXT_PREFIX}/{sample_id}.json")
         text_blob.upload_from_string(
-            json.dumps(record, ensure_ascii=False) + "\n",
-            content_type="application/jsonl",
+            json.dumps(record, ensure_ascii=False, indent=2),
+            content_type="application/json",
         )
     except Exception:
         logger.warning("학습 데이터셋 저장 실패 (sample_id=%s)", sample_id, exc_info=True)
