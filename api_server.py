@@ -145,6 +145,13 @@ def call_gemini_ars(jeju_text: str) -> GeminiARSResult:
             return response.parsed
         return GeminiARSResult.model_validate(response.parsed)
 
+    finish_reason = response.candidates[0].finish_reason if response.candidates else None
+    logger.warning(
+        "Gemini structured 파싱 실패, raw text로 폴백 (finish_reason=%s, text_len=%s)",
+        finish_reason,
+        len(response.text) if response.text else 0,
+    )
+
     if not response.text:
         raise RuntimeError("Gemini가 빈 응답을 반환했습니다.")
     return GeminiARSResult.model_validate_json(response.text)
