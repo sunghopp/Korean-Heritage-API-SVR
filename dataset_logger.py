@@ -48,11 +48,26 @@ def _build_eojeol_list(dialect_text: str, standard_text: str) -> list[dict]:
     return eojeol_list
 
 
+def _confidence_tier(confidence: float) -> str:
+    """Classify STT confidence into a review tier for the dataset flywheel.
+
+    - auto_approved: ready to train on directly
+    - needs_monitoring: not reviewed, but kept under observation
+    - needs_review: must be manually reviewed/relabeled before training
+    """
+    if confidence >= 0.9:
+        return "auto_approved"
+    if confidence >= 0.7:
+        return "needs_monitoring"
+    return "needs_review"
+
+
 def save_training_sample(
     *,
     audio_path: str,
     jeju_text: str,
     standard_text: str,
+    confidence: float,
     speaker_id: str = "1",
 ) -> None:
     """Best-effort upload of one (audio, label) pair for future STT training.
@@ -61,24 +76,28 @@ def save_training_sample(
     caller's response. Blocking I/O; run via asyncio.to_thread from async code.
     """
     sample_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
+    tier = _confidence_tier(confidence)
     try:
         bucket = _client().bucket(DATASET_BUCKET)
 
-        audio_blob = bucket.blob(f"{DATASET_AUDIO_PREFIX}/{sample_id}.wav")
+        audio_blob_path = f"{DATASET_AUDIO_PREFIX}/{tier}/{sample_id}.wav"
+        audio_blob = bucket.blob(audio_blob_path)
         audio_blob.upload_from_filename(audio_path)
 
         record = {
             "id": sample_id,
-            "audio_filepath": f"{DATASET_AUDIO_PREFIX}/{sample_id}.wav",
+            "audio_filepath": audio_blob_path,
             "form": jeju_text,
             "standard_form": standard_text,
             "dialect_form": jeju_text,
             "speaker_id": speaker_id,
             "note": "",
             "eojeolList": _build_eojeol_list(jeju_text, standard_text),
+            "confidence": round(confidence, 4),
+            "review_status": tier,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        text_blob = bucket.blob(f"{DATASET_TEXT_PREFIX}/{sample_id}.json")
+        text_blob = bucket.blob(f"{DATASET_TEXT_PREFIX}/{tier}/{sample_id}.json")
         text_blob.upload_from_string(
             json.dumps(record, ensure_ascii=False, indent=2),
             content_type="application/json",
