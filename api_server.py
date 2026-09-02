@@ -14,12 +14,14 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from google import genai
+from google.api_core.exceptions import NotFound
 from google.genai import types
 from peft import PeftConfig, PeftModel
 from pydantic import BaseModel, Field
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 from ars_prompt import SYSTEM_INSTRUCTION, build_few_shot_contents
+from dataset_dashboard import TIERS, get_audio_bytes, get_stats, list_samples
 from dataset_logger import save_training_sample
 from tts_engine import JejuVITSEngine
 
@@ -293,3 +295,27 @@ async def tts_only(request: TTSRequest):
         media_type="audio/wav",
         headers={"Content-Disposition": 'inline; filename="jeju_tts.wav"'},
     )
+
+
+@app.get("/dataset/stats")
+async def dataset_stats():
+    """Data-flywheel dashboard: counts per confidence review tier."""
+    return await asyncio.to_thread(get_stats)
+
+
+@app.get("/dataset/samples")
+async def dataset_samples(limit: int = 100):
+    """Data-flywheel dashboard: recent training samples across all tiers."""
+    return {"samples": await asyncio.to_thread(list_samples, limit)}
+
+
+@app.get("/dataset/audio/{tier}/{sample_id}")
+async def dataset_audio(tier: str, sample_id: str):
+    """Data-flywheel dashboard: stream one training sample's audio from GCS."""
+    if tier not in TIERS:
+        raise HTTPException(status_code=404, detail="알 수 없는 tier입니다.")
+    try:
+        audio_bytes = await asyncio.to_thread(get_audio_bytes, tier, sample_id)
+    except NotFound:
+        raise HTTPException(status_code=404, detail="오디오를 찾을 수 없습니다.")
+    return Response(content=audio_bytes, media_type="audio/wav")
