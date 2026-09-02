@@ -151,15 +151,16 @@ STT/Gemini/TTS 로드 상태를 확인합니다.
 curl http://localhost:8080/health
 ```
 
-### `GET /dataset/stats`, `GET /dataset/samples`, `GET /dataset/audio/{tier}/{sample_id}`
+### `GET /dataset/stats`, `GET /dataset/samples`, `GET /dataset/audio/{sample_id}`, `PATCH /dataset/samples/{tier}/{sample_id}`
 
-프론트엔드 데이터 플라이휠 대시보드용 조회 API입니다. `dataset_dashboard.py`가 GCS의 `dataset/extracted/{Audio,Text}/{tier}/` 아래 저장된 학습 데이터를 조회만 합니다(쓰기 없음).
+프론트엔드 데이터 플라이휠 대시보드용 API입니다. `dataset_dashboard.py`가 GCS의 `dataset/extracted/{Audio,Text}` 아래 저장된 학습 데이터를 다룹니다.
 
-- `GET /dataset/stats` — 티어별 개수 + 총합 (`{"total": ..., "auto_approved": ..., "needs_monitoring": ..., "needs_review": ...}`)
-- `GET /dataset/samples?limit=100` — 최신순 정렬된 라벨 레코드 목록 (`{"samples": [...]}`)
-- `GET /dataset/audio/{tier}/{sample_id}` — 해당 샘플의 오디오를 GCS에서 받아 `audio/wav`로 그대로 중계
+- `GET /dataset/stats` — 티어별 개수 + 총합 (`{"total": ..., "auto_approved": ..., "needs_monitoring": ..., "needs_review": ..., "reviewed": ...}`)
+- `GET /dataset/samples?limit=100` — 최신순 정렬된 라벨 레코드 목록 (`{"samples": [...]}`, 모든 티어 포함)
+- `GET /dataset/audio/{sample_id}` — 해당 샘플의 오디오를 GCS에서 받아 `audio/wav`로 그대로 중계 (오디오는 티어 구분 없이 평탄한 경로에 저장되므로 tier 인자 불필요)
+- `PATCH /dataset/samples/{tier}/{sample_id}` — 사람이 라벨(`dialect_form`/`standard_form`)을 직접 수정할 때 사용. 요청 바디에 있는 필드만 갱신하고 `eojeolList`를 재계산한 뒤, `review_status`를 `reviewed`로 바꿔 `Text/reviewed/{sample_id}.json`으로 옮긴다(원래 티어 폴더의 파일은 삭제). 수정된 레코드 전체를 응답으로 반환.
 
-세 엔드포인트 모두 `/translate`, `/tts`와 마찬가지로 **인증 없이 공개**되어 있습니다 — 수집된 사용자 음성/발화 데이터가 URL을 아는 누구에게나 노출된다는 점을 유의하세요.
+네 엔드포인트 모두 `/translate`, `/tts`와 마찬가지로 **인증 없이 공개**되어 있습니다 — 수집된 사용자 음성/발화 데이터가 URL을 아는 누구에게나 노출되고, 이 PATCH로 아무나 라벨을 고칠 수 있다는 점을 유의하세요.
 
 ## 환경 변수
 
@@ -265,23 +266,25 @@ STT LoRA 로딩 방식은 이번 변경에서 수정하지 않았습니다.
 `POST /translate` 요청마다 사용자 발화 음성과 STT/번역 결과를 이후 모델 재학습용 데이터셋으로 GCS에 적재합니다 (`dataset_logger.py`).
 
 ```text
-gs://malmoi-jeju-dataset-2026/dataset/extracted/Audio/{tier}/{id}.wav
+gs://malmoi-jeju-dataset-2026/dataset/extracted/Audio/{id}.wav
 gs://malmoi-jeju-dataset-2026/dataset/extracted/Text/{tier}/{id}.json
 ```
 
-`{id}`는 요청마다 새로 생성되는 타임스탬프+랜덤 hex 키이며, 오디오/라벨 파일이 1:1로 짝지어집니다. 라벨 파일은 JSON 객체 하나로, 참조 데이터셋(`extracted/extracted/Text/Text/Label/*.json`)의 `utterance` 레벨 필드명(`form`, `standard_form`, `dialect_form`, `speaker_id`, `note`)을 재사용하고, 어절(공백 기준 단어) 단위로 쪼갠 `eojeolList`도 함께 담습니다.
+`{id}`는 요청마다 새로 생성되는 타임스탬프+랜덤 hex 키이며, 오디오/라벨 파일이 1:1로 짝지어집니다. **오디오는 티어 구분 없이 항상 평탄한 경로**에 저장되고, **라벨(Text)만 티어별 폴더**로 나뉩니다. 라벨 파일은 JSON 객체 하나로, 참조 데이터셋(`extracted/extracted/Text/Text/Label/*.json`)의 `utterance` 레벨 필드명(`form`, `standard_form`, `dialect_form`, `speaker_id`, `note`)을 재사용하고, 어절(공백 기준 단어) 단위로 쪼갠 `eojeolList`도 함께 담습니다.
 
 `eojeolList`는 `jeju_text`(방언 원문)와 `standard_text`(Gemini가 생성한 문장 전체 표준어 번역)를 각각 공백 기준으로 어절 분리한 뒤 같은 순서로 위치 매칭한 것입니다. Gemini로부터 실제 어절 단위 정렬을 받지 않기 때문에 나온 휴리스틱으로, 두 문장의 어절 수가 다르면(조사 추가/삭제 등) 부정확할 수 있습니다 — 표준어 쪽 어절이 모자라면 `standard`/`isDialect`는 `null`로 남습니다.
 
-### Confidence 기반 3단계 티어 분류
+### Confidence 기반 4단계 티어 분류
 
-`{tier}`는 Whisper STT 결과의 confidence(토큰별 평균 확률, `api_server.py`의 `transcribe_jeju()`가 `compute_transition_scores`로 계산)에 따라 세 값 중 하나로 정해집니다 (`dataset_logger._confidence_tier`):
+라벨이 저장되는 `{tier}` 폴더는 Whisper STT 결과의 confidence(토큰별 평균 확률, `api_server.py`의 `transcribe_jeju()`가 `compute_transition_scores`로 계산)에 따라 최초 3가지 중 하나로 정해집니다 (`dataset_logger._confidence_tier`):
 
 | confidence | tier | 의미 |
 |---|---|---|
 | `>= 0.9` | `auto_approved` | 사람 리뷰 없이 바로 학습에 쓸 수 있는 데이터 |
 | `0.7 <= confidence < 0.9` | `needs_monitoring` | 즉시 리뷰하지는 않지만 관찰 대상 |
 | `< 0.7` | `needs_review` | 사람이 직접 리뷰/라벨링해야 하는 데이터 |
+
+이후 대시보드에서 사람이 `PATCH /dataset/samples/{tier}/{sample_id}`로 라벨을 직접 수정하면 4번째 값 **`reviewed`**로 옮겨집니다(원래 티어와 무관하게).
 
 라벨 JSON에는 `confidence`(0~1 소수, 소수점 4자리 반올림)와 `review_status`(위 tier 문자열) 필드가 함께 저장됩니다.
 

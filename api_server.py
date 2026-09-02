@@ -21,7 +21,13 @@ from pydantic import BaseModel, Field
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 from ars_prompt import SYSTEM_INSTRUCTION, build_few_shot_contents
-from dataset_dashboard import TIERS, get_audio_bytes, get_stats, list_samples
+from dataset_dashboard import (
+    ALL_TIERS,
+    get_audio_bytes,
+    get_stats,
+    list_samples,
+    update_sample_label,
+)
 from dataset_logger import save_training_sample
 from tts_engine import JejuVITSEngine
 
@@ -309,13 +315,37 @@ async def dataset_samples(limit: int = 100):
     return {"samples": await asyncio.to_thread(list_samples, limit)}
 
 
-@app.get("/dataset/audio/{tier}/{sample_id}")
-async def dataset_audio(tier: str, sample_id: str):
+@app.get("/dataset/audio/{sample_id}")
+async def dataset_audio(sample_id: str):
     """Data-flywheel dashboard: stream one training sample's audio from GCS."""
-    if tier not in TIERS:
-        raise HTTPException(status_code=404, detail="알 수 없는 tier입니다.")
     try:
-        audio_bytes = await asyncio.to_thread(get_audio_bytes, tier, sample_id)
+        audio_bytes = await asyncio.to_thread(get_audio_bytes, sample_id)
     except NotFound:
         raise HTTPException(status_code=404, detail="오디오를 찾을 수 없습니다.")
     return Response(content=audio_bytes, media_type="audio/wav")
+
+
+class DatasetLabelUpdate(BaseModel):
+    dialect_form: str | None = None
+    standard_form: str | None = None
+
+
+@app.patch("/dataset/samples/{tier}/{sample_id}")
+async def update_dataset_sample(tier: str, sample_id: str, payload: DatasetLabelUpdate):
+    """Data-flywheel dashboard: apply a human correction and move the sample
+    to the 'reviewed' tier."""
+    if tier not in ALL_TIERS:
+        raise HTTPException(status_code=404, detail="알 수 없는 tier입니다.")
+    if payload.dialect_form is None and payload.standard_form is None:
+        raise HTTPException(status_code=422, detail="수정할 필드가 없습니다.")
+    try:
+        updated = await asyncio.to_thread(
+            update_sample_label,
+            current_tier=tier,
+            sample_id=sample_id,
+            dialect_form=payload.dialect_form,
+            standard_form=payload.standard_form,
+        )
+    except NotFound:
+        raise HTTPException(status_code=404, detail="데이터를 찾을 수 없습니다.")
+    return updated

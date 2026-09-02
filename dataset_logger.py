@@ -24,7 +24,7 @@ def _client() -> storage.Client:
     return _storage_client
 
 
-def _build_eojeol_list(dialect_text: str, standard_text: str) -> list[dict]:
+def build_eojeol_list(dialect_text: str, standard_text: str) -> list[dict]:
     """Split into whitespace-delimited eojeol and pair by position.
 
     We don't get true word-level alignment from Gemini (only whole-sentence
@@ -80,7 +80,7 @@ def save_training_sample(
     try:
         bucket = _client().bucket(DATASET_BUCKET)
 
-        audio_blob_path = f"{DATASET_AUDIO_PREFIX}/{tier}/{sample_id}.wav"
+        audio_blob_path = f"{DATASET_AUDIO_PREFIX}/{sample_id}.wav"
         audio_blob = bucket.blob(audio_blob_path)
         audio_blob.upload_from_filename(audio_path)
 
@@ -92,7 +92,7 @@ def save_training_sample(
             "dialect_form": jeju_text,
             "speaker_id": speaker_id,
             "note": "",
-            "eojeolList": _build_eojeol_list(jeju_text, standard_text),
+            "eojeolList": build_eojeol_list(jeju_text, standard_text),
             "confidence": round(confidence, 4),
             "review_status": tier,
             "created_at": datetime.now(timezone.utc).isoformat(),
