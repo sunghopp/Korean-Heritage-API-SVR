@@ -104,7 +104,7 @@ print("✅ 모델 적재 단계 완료")
 # ==========================================
 # 3. Pipeline helpers
 # ==========================================
-def transcribe_jeju(audio_path: str) -> str:
+def transcribe_jeju(audio_path: str) -> tuple[str, float]:
     speech_array, sampling_rate = librosa.load(audio_path, sr=16000)
     inputs = processor(
         speech_array,
@@ -113,17 +113,29 @@ def transcribe_jeju(audio_path: str) -> str:
     ).to(DEVICE)
 
     with torch.inference_mode():
-        predicted_ids = stt_model.generate(
+        output = stt_model.generate(
             **inputs,
             language="ko",
             task="transcribe",
+            output_scores=True,
+            return_dict_in_generate=True,
         )
 
-    return processor.batch_decode(
-        predicted_ids,
+    transcript = processor.batch_decode(
+        output.sequences,
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0].strip()
+
+    # 데이터셋 저장 시 학습 가능 여부를 가르는 confidence: 토큰별 평균 로그확률을 exp()로
+    # 0~1 확률값으로 변환한다 (dataset_logger.save_training_sample의 티어 분류 기준).
+    transition_scores = stt_model.compute_transition_scores(
+        output.sequences, output.scores, normalize_logits=True
+    )
+    valid_scores = transition_scores[transition_scores > -1e9]
+    confidence = torch.exp(valid_scores.mean()).item() if valid_scores.numel() > 0 else 0.0
+
+    return transcript, confidence
 
 
 def call_gemini_ars(jeju_text: str) -> GeminiARSResult:
@@ -210,7 +222,7 @@ async def translate_audio(file: UploadFile = File(...)):
         # Model objects share CPU/GPU memory. Serialize demo requests to avoid
         # concurrent inference spikes on a single Cloud Run instance.
         async with INFERENCE_LOCK:
-            jeju_text = await asyncio.to_thread(transcribe_jeju, temp_file_path)
+            jeju_text, stt_confidence = await asyncio.to_thread(transcribe_jeju, temp_file_path)
             if not jeju_text:
                 raise HTTPException(status_code=422, detail="STT 결과가 비어 있습니다.")
 
@@ -222,6 +234,7 @@ async def translate_audio(file: UploadFile = File(...)):
                     audio_path=temp_file_path,
                     jeju_text=jeju_text,
                     standard_text=gemini_result.standard_text,
+                    confidence=stt_confidence,
                 )
             except Exception:
                 logger.warning("데이터셋 저장 호출 실패", exc_info=True)

@@ -255,13 +255,25 @@ STT LoRA 로딩 방식은 이번 변경에서 수정하지 않았습니다.
 `POST /translate` 요청마다 사용자 발화 음성과 STT/번역 결과를 이후 모델 재학습용 데이터셋으로 GCS에 적재합니다 (`dataset_logger.py`).
 
 ```text
-gs://malmoi-jeju-dataset-2026/dataset/extracted/Audio/{id}.wav
-gs://malmoi-jeju-dataset-2026/dataset/extracted/Text/{id}.json
+gs://malmoi-jeju-dataset-2026/dataset/extracted/Audio/{tier}/{id}.wav
+gs://malmoi-jeju-dataset-2026/dataset/extracted/Text/{tier}/{id}.json
 ```
 
 `{id}`는 요청마다 새로 생성되는 타임스탬프+랜덤 hex 키이며, 오디오/라벨 파일이 1:1로 짝지어집니다. 라벨 파일은 JSON 객체 하나로, 참조 데이터셋(`extracted/extracted/Text/Text/Label/*.json`)의 `utterance` 레벨 필드명(`form`, `standard_form`, `dialect_form`, `speaker_id`, `note`)을 재사용하고, 어절(공백 기준 단어) 단위로 쪼갠 `eojeolList`도 함께 담습니다.
 
 `eojeolList`는 `jeju_text`(방언 원문)와 `standard_text`(Gemini가 생성한 문장 전체 표준어 번역)를 각각 공백 기준으로 어절 분리한 뒤 같은 순서로 위치 매칭한 것입니다. Gemini로부터 실제 어절 단위 정렬을 받지 않기 때문에 나온 휴리스틱으로, 두 문장의 어절 수가 다르면(조사 추가/삭제 등) 부정확할 수 있습니다 — 표준어 쪽 어절이 모자라면 `standard`/`isDialect`는 `null`로 남습니다.
+
+### Confidence 기반 3단계 티어 분류
+
+`{tier}`는 Whisper STT 결과의 confidence(토큰별 평균 확률, `api_server.py`의 `transcribe_jeju()`가 `compute_transition_scores`로 계산)에 따라 세 값 중 하나로 정해집니다 (`dataset_logger._confidence_tier`):
+
+| confidence | tier | 의미 |
+|---|---|---|
+| `>= 0.9` | `auto_approved` | 사람 리뷰 없이 바로 학습에 쓸 수 있는 데이터 |
+| `0.7 <= confidence < 0.9` | `needs_monitoring` | 즉시 리뷰하지는 않지만 관찰 대상 |
+| `< 0.7` | `needs_review` | 사람이 직접 리뷰/라벨링해야 하는 데이터 |
+
+라벨 JSON에는 `confidence`(0~1 소수, 소수점 4자리 반올림)와 `review_status`(위 tier 문자열) 필드가 함께 저장됩니다.
 
 기본 환경변수:
 
