@@ -151,6 +151,16 @@ STT/Gemini/TTS 로드 상태를 확인합니다.
 curl http://localhost:8080/health
 ```
 
+### `GET /dataset/stats`, `GET /dataset/samples`, `GET /dataset/audio/{tier}/{sample_id}`
+
+프론트엔드 데이터 플라이휠 대시보드용 조회 API입니다. `dataset_dashboard.py`가 GCS의 `dataset/extracted/{Audio,Text}/{tier}/` 아래 저장된 학습 데이터를 조회만 합니다(쓰기 없음).
+
+- `GET /dataset/stats` — 티어별 개수 + 총합 (`{"total": ..., "auto_approved": ..., "needs_monitoring": ..., "needs_review": ...}`)
+- `GET /dataset/samples?limit=100` — 최신순 정렬된 라벨 레코드 목록 (`{"samples": [...]}`)
+- `GET /dataset/audio/{tier}/{sample_id}` — 해당 샘플의 오디오를 GCS에서 받아 `audio/wav`로 그대로 중계
+
+세 엔드포인트 모두 `/translate`, `/tts`와 마찬가지로 **인증 없이 공개**되어 있습니다 — 수집된 사용자 음성/발화 데이터가 URL을 아는 누구에게나 노출된다는 점을 유의하세요.
+
 ## 환경 변수
 
 `.env.example` 참고.
