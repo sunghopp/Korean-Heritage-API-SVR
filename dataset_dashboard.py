@@ -12,6 +12,7 @@ DATASET_AUDIO_PREFIX = os.getenv("DATASET_AUDIO_PREFIX", "dataset/extracted/Audi
 DATASET_TEXT_PREFIX = os.getenv("DATASET_TEXT_PREFIX", "dataset/extracted/Text")
 
 TIERS = ("tier1", "tier2", "tier3")
+REVIEW_STATUSES = ("unreviewed", "not_required", "human_verified", "rejected")
 
 _storage_client: storage.Client | None = None
 
@@ -23,24 +24,33 @@ def _client() -> storage.Client:
     return _storage_client
 
 
-def get_stats() -> dict:
+def _fetch_all_records() -> list[dict]:
     bucket = _client().bucket(DATASET_BUCKET)
-    counts = {
-        tier: sum(1 for _ in bucket.list_blobs(prefix=f"{DATASET_TEXT_PREFIX}/{tier}/"))
-        for tier in TIERS
-    }
-    return {"total": sum(counts.values()), **counts}
-
-
-def list_samples(limit: int = 100) -> list[dict]:
-    bucket = _client().bucket(DATASET_BUCKET)
-    samples: list[dict] = []
+    records: list[dict] = []
     for tier in TIERS:
         for blob in bucket.list_blobs(prefix=f"{DATASET_TEXT_PREFIX}/{tier}/"):
             if blob.name.endswith(".json"):
-                samples.append(json.loads(blob.download_as_text()))
-    samples.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-    return samples[:limit]
+                records.append(json.loads(blob.download_as_text()))
+    records.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return records
+
+
+def get_stats() -> dict:
+    records = _fetch_all_records()
+    tier_counts = {tier: 0 for tier in TIERS}
+    status_counts = {status: 0 for status in REVIEW_STATUSES}
+    for record in records:
+        tier = record.get("tier")
+        if tier in tier_counts:
+            tier_counts[tier] += 1
+        status = record.get("review_status")
+        if status in status_counts:
+            status_counts[status] += 1
+    return {"total": len(records), **tier_counts, **status_counts}
+
+
+def list_samples(limit: int = 100) -> list[dict]:
+    return _fetch_all_records()[:limit]
 
 
 def get_audio_bytes(sample_id: str) -> bytes:
