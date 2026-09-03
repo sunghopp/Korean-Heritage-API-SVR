@@ -155,10 +155,10 @@ curl http://localhost:8080/health
 
 프론트엔드 데이터 플라이휠 대시보드용 API입니다. `dataset_dashboard.py`가 GCS의 `dataset/extracted/{Audio,Text}` 아래 저장된 학습 데이터를 다룹니다.
 
-- `GET /dataset/stats` — 티어별 개수 + 총합 (`{"total": ..., "auto_approved": ..., "needs_monitoring": ..., "needs_review": ..., "reviewed": ...}`)
+- `GET /dataset/stats` — 티어별 개수 + 총합 (`{"total": ..., "tier1": ..., "tier2": ..., "tier3": ...}`)
 - `GET /dataset/samples?limit=100` — 최신순 정렬된 라벨 레코드 목록 (`{"samples": [...]}`, 모든 티어 포함)
 - `GET /dataset/audio/{sample_id}` — 해당 샘플의 오디오를 GCS에서 받아 `audio/wav`로 그대로 중계 (오디오는 티어 구분 없이 평탄한 경로에 저장되므로 tier 인자 불필요)
-- `PATCH /dataset/samples/{tier}/{sample_id}` — 사람이 라벨(`dialect_form`/`standard_form`)을 직접 수정할 때 사용. 요청 바디에 있는 필드만 갱신하고 `eojeolList`를 재계산한 뒤, `review_status`를 `reviewed`로 바꿔 `Text/reviewed/{sample_id}.json`으로 옮긴다(원래 티어 폴더의 파일은 삭제). 수정된 레코드 전체를 응답으로 반환.
+- `PATCH /dataset/samples/{tier}/{sample_id}` — 사람의 검수 결정을 반영할 때 사용. 요청 바디는 `review_status`(`human_verified` 또는 `rejected`, 필수)와 선택적으로 `dialect_form`/`standard_form`(라벨을 함께 고칠 때만). 있는 필드만 갱신하고, 텍스트가 바뀌면 `eojeolList`를 재계산한다. **Tier는 절대 바뀌지 않으므로 파일을 옮기지 않고 같은 경로(`Text/{tier}/{sample_id}.json`)에 덮어쓴다.** 수정된 레코드 전체를 응답으로 반환.
 
 네 엔드포인트 모두 `/translate`, `/tts`와 마찬가지로 **인증 없이 공개**되어 있습니다 — 수집된 사용자 음성/발화 데이터가 URL을 아는 누구에게나 노출되고, 이 PATCH로 아무나 라벨을 고칠 수 있다는 점을 유의하세요.
 
@@ -274,19 +274,28 @@ gs://malmoi-jeju-dataset-2026/dataset/extracted/Text/{tier}/{id}.json
 
 `eojeolList`는 `jeju_text`(방언 원문)와 `standard_text`(Gemini가 생성한 문장 전체 표준어 번역)를 각각 공백 기준으로 어절 분리한 뒤 같은 순서로 위치 매칭한 것입니다. Gemini로부터 실제 어절 단위 정렬을 받지 않기 때문에 나온 휴리스틱으로, 두 문장의 어절 수가 다르면(조사 추가/삭제 등) 부정확할 수 있습니다 — 표준어 쪽 어절이 모자라면 `standard`/`isDialect`는 `null`로 남습니다.
 
-### Confidence 기반 4단계 티어 분류
+### Tier(고정) × Review Status(검수 워크플로) 이중 분류
 
-라벨이 저장되는 `{tier}` 폴더는 Whisper STT 결과의 confidence(토큰별 평균 확률, `api_server.py`의 `transcribe_jeju()`가 `compute_transition_scores`로 계산)에 따라 최초 3가지 중 하나로 정해집니다 (`dataset_logger._confidence_tier`):
+`tier`와 `review_status`는 서로 독립된 필드입니다. **`tier`는 최초 저장 시 confidence로 한 번 정해지면 이후 절대 바뀌지 않고**, 라벨이 저장되는 `{tier}` 폴더도 이 값을 그대로 씁니다(`dataset_logger._compute_tier`):
 
 | confidence | tier | 의미 |
 |---|---|---|
-| `>= 0.9` | `auto_approved` | 사람 리뷰 없이 바로 학습에 쓸 수 있는 데이터 |
-| `0.7 <= confidence < 0.9` | `needs_monitoring` | 즉시 리뷰하지는 않지만 관찰 대상 |
-| `< 0.7` | `needs_review` | 사람이 직접 리뷰/라벨링해야 하는 데이터 |
+| `>= 0.8` | `tier1` | 신뢰도 높음 |
+| `0.6 <= confidence < 0.8` | `tier2` | 관찰 필요 |
+| `< 0.6` | `tier3` | 신뢰도 낮음 |
 
-이후 대시보드에서 사람이 `PATCH /dataset/samples/{tier}/{sample_id}`로 라벨을 직접 수정하면 4번째 값 **`reviewed`**로 옮겨집니다(원래 티어와 무관하게).
+**`review_status`는 사람의 검수 워크플로에 따라 바뀌는 값**이며, 파일 경로에는 반영되지 않고(파일 이동 없음) JSON 필드로만 관리됩니다(`dataset_logger._initial_review_status`, `dataset_dashboard.update_sample_label`):
 
-라벨 JSON에는 `confidence`(0~1 소수, 소수점 4자리 반올림)와 `review_status`(위 tier 문자열) 필드가 함께 저장됩니다.
+| review_status | 의미 |
+|---|---|
+| `not_required` | Tier1의 최초 상태 — 검수 불필요 |
+| `unreviewed` | Tier2/3의 최초 상태 — 검수 대기 |
+| `human_verified` | 사람이 직접 검수(필요시 라벨 수정)한 상태 |
+| `rejected` | 사람이 검수 후 저품질로 판단해 학습에서 제외한 상태 |
+
+`human_verified`/`rejected`는 `PATCH /dataset/samples/{tier}/{sample_id}`로만 설정할 수 있습니다. 학습 스크립트에서 검수된 데이터만 골라 쓰고 싶다면, 파일 경로가 아니라 각 레코드의 `review_status` 필드를 확인해 필터링하면 됩니다(예: `not_required`/`human_verified`만 포함, `unreviewed`/`rejected`는 제외).
+
+라벨 JSON에는 `confidence`(0~1 소수, 소수점 4자리 반올림), `tier`, `review_status` 필드가 함께 저장됩니다.
 
 기본 환경변수:
 
