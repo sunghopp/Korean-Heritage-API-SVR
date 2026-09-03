@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from typing import Literal
 
 import librosa
 import torch
@@ -22,7 +23,7 @@ from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 from ars_prompt import SYSTEM_INSTRUCTION, build_few_shot_contents
 from dataset_dashboard import (
-    ALL_TIERS,
+    TIERS,
     get_audio_bytes,
     get_stats,
     list_samples,
@@ -328,21 +329,22 @@ async def dataset_audio(sample_id: str):
 class DatasetLabelUpdate(BaseModel):
     dialect_form: str | None = None
     standard_form: str | None = None
+    review_status: Literal["human_verified", "rejected"]
 
 
 @app.patch("/dataset/samples/{tier}/{sample_id}")
 async def update_dataset_sample(tier: str, sample_id: str, payload: DatasetLabelUpdate):
-    """Data-flywheel dashboard: apply a human correction and move the sample
-    to the 'reviewed' tier."""
-    if tier not in ALL_TIERS:
+    """Data-flywheel dashboard: record a human review decision (and optional
+    label correction) for one sample. Tier never changes; only review_status
+    and, optionally, the label text are updated in place."""
+    if tier not in TIERS:
         raise HTTPException(status_code=404, detail="알 수 없는 tier입니다.")
-    if payload.dialect_form is None and payload.standard_form is None:
-        raise HTTPException(status_code=422, detail="수정할 필드가 없습니다.")
     try:
         updated = await asyncio.to_thread(
             update_sample_label,
-            current_tier=tier,
+            tier=tier,
             sample_id=sample_id,
+            review_status=payload.review_status,
             dialect_form=payload.dialect_form,
             standard_form=payload.standard_form,
         )
