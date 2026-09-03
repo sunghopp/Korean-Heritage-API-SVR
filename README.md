@@ -155,7 +155,7 @@ curl http://localhost:8080/health
 
 프론트엔드 데이터 플라이휠 대시보드용 API입니다. `dataset_dashboard.py`가 GCS의 `dataset/extracted/{Audio,Text}` 아래 저장된 학습 데이터를 다룹니다.
 
-- `GET /dataset/stats` — 티어별 개수 + 총합 (`{"total": ..., "tier1": ..., "tier2": ..., "tier3": ...}`)
+- `GET /dataset/stats` — 티어별/검수상태별 개수 + 총합 (`{"total": ..., "tier1": ..., "tier2": ..., "tier3": ..., "unreviewed": ..., "not_required": ..., "human_verified": ..., "rejected": ...}`). review_status는 파일 경로가 아니라 내용에만 있어 전체 레코드를 다운로드해 집계한다.
 - `GET /dataset/samples?limit=100` — 최신순 정렬된 라벨 레코드 목록 (`{"samples": [...]}`, 모든 티어 포함)
 - `GET /dataset/audio/{sample_id}` — 해당 샘플의 오디오를 GCS에서 받아 `audio/wav`로 그대로 중계 (오디오는 티어 구분 없이 평탄한 경로에 저장되므로 tier 인자 불필요)
 - `PATCH /dataset/samples/{tier}/{sample_id}` — 사람의 검수 결정을 반영할 때 사용. 요청 바디는 `review_status`(`human_verified` 또는 `rejected`, 필수)와 선택적으로 `dialect_form`/`standard_form`(라벨을 함께 고칠 때만). 있는 필드만 갱신하고, 텍스트가 바뀌면 `eojeolList`를 재계산한다. **Tier는 절대 바뀌지 않으므로 파일을 옮기지 않고 같은 경로(`Text/{tier}/{sample_id}.json`)에 덮어쓴다.** 수정된 레코드 전체를 응답으로 반환.
