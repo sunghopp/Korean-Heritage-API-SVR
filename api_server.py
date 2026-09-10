@@ -23,7 +23,6 @@ from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 from ars_prompt import SYSTEM_INSTRUCTION, build_few_shot_contents
 from dataset_dashboard import (
-    TIERS,
     get_audio_bytes,
     get_stats,
     list_samples,
@@ -306,13 +305,13 @@ async def tts_only(request: TTSRequest):
 
 @app.get("/dataset/stats")
 async def dataset_stats():
-    """Data-flywheel dashboard: counts per confidence review tier."""
+    """Data-flywheel dashboard: counts per review status."""
     return await asyncio.to_thread(get_stats)
 
 
 @app.get("/dataset/samples")
 async def dataset_samples(limit: int = 100):
-    """Data-flywheel dashboard: recent training samples across all tiers."""
+    """Data-flywheel dashboard: recent training samples."""
     return {"samples": await asyncio.to_thread(list_samples, limit)}
 
 
@@ -329,22 +328,19 @@ async def dataset_audio(sample_id: str):
 class DatasetLabelUpdate(BaseModel):
     dialect_form: str | None = None
     standard_form: str | None = None
-    review_status: Literal["human_verified", "rejected"]
+    status: Literal["approved", "rejected"]
 
 
-@app.patch("/dataset/samples/{tier}/{sample_id}")
-async def update_dataset_sample(tier: str, sample_id: str, payload: DatasetLabelUpdate):
+@app.patch("/dataset/samples/{sample_id}")
+async def update_dataset_sample(sample_id: str, payload: DatasetLabelUpdate):
     """Data-flywheel dashboard: record a human review decision (and optional
-    label correction) for one sample. Tier never changes; only review_status
-    and, optionally, the label text are updated in place."""
-    if tier not in TIERS:
-        raise HTTPException(status_code=404, detail="알 수 없는 tier입니다.")
+    label correction) for one sample. Only status and, optionally, the label
+    text are updated in place."""
     try:
         updated = await asyncio.to_thread(
             update_sample_label,
-            tier=tier,
             sample_id=sample_id,
-            review_status=payload.review_status,
+            status=payload.status,
             dialect_form=payload.dialect_form,
             standard_form=payload.standard_form,
         )
