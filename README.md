@@ -204,9 +204,11 @@ docker run --rm -p 8080:8080 \
 
 ## Cloud Run 배포 시 참고
 
-현재 기존 서버와 동일하게 CPU PyTorch 설치를 유지했습니다. STT + VITS를 같은 요청에서 순차 실행하므로 데모에서는 **instance concurrency=1**을 권장합니다.
+STT + VITS를 같은 요청에서 순차 실행하므로 데모에서는 **instance concurrency=1**을 권장합니다.
 
-Cloud Run GPU를 사용할 경우 Docker/PyTorch를 CUDA 지원 이미지로 바꿔야 하며, 현재 CPU wheel 그대로는 `torch.cuda.is_available()`이 `False`입니다.
+`requirements.txt`는 CUDA 지원 PyTorch 빌드를 설치합니다. Cloud Run 인스턴스에 GPU가 붙어 있으면
+`torch.cuda.is_available()`이 `True`가 되어 STT(Whisper)/TTS(VITS) 모델이 자동으로 GPU를 사용하고,
+GPU가 없으면 자동으로 CPU로 동작합니다(`api_server.py`의 `DEVICE` 분기 참고).
 
 ## 프로젝트 구조
 
