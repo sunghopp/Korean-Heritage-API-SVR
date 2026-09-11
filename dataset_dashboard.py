@@ -23,28 +23,46 @@ def _client() -> storage.Client:
     return _storage_client
 
 
-def _fetch_all_records() -> list[dict]:
+def _list_sample_index() -> list[dict]:
+    """List every sample's id/status without downloading its JSON body.
+
+    GCS includes each blob's custom metadata in the listing response itself,
+    so this needs one metadata-only pass over the bucket instead of
+    downloading every record just to sort/count them. sample_id embeds a UTC
+    timestamp prefix (see dataset_logger.save_training_sample), so sorting
+    the id string descending is equivalent to sorting by created_at
+    descending. Samples saved before this metadata existed fall back to
+    "pending" until they're next touched by update_sample_label.
+    """
     bucket = _client().bucket(DATASET_BUCKET)
-    records: list[dict] = []
+    index: list[dict] = []
     for blob in bucket.list_blobs(prefix=f"{DATASET_TEXT_PREFIX}/"):
-        if blob.name.endswith(".json"):
-            records.append(json.loads(blob.download_as_text()))
-    records.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-    return records
+        if not blob.name.endswith(".json"):
+            continue
+        sample_id = blob.name.rsplit("/", 1)[-1].removesuffix(".json")
+        status = (blob.metadata or {}).get("status", "pending")
+        index.append({"sample_id": sample_id, "status": status})
+    index.sort(key=lambda r: r["sample_id"], reverse=True)
+    return index
 
 
 def get_stats() -> dict:
-    records = _fetch_all_records()
+    index = _list_sample_index()
     status_counts = {status: 0 for status in STATUSES}
-    for record in records:
-        status = record.get("status")
-        if status in status_counts:
-            status_counts[status] += 1
-    return {"total": len(records), **status_counts}
+    for row in index:
+        if row["status"] in status_counts:
+            status_counts[row["status"]] += 1
+    return {"total": len(index), **status_counts}
 
 
-def list_samples(limit: int = 100) -> list[dict]:
-    return _fetch_all_records()[:limit]
+def list_samples(*, limit: int = 20, offset: int = 0) -> dict:
+    index = _list_sample_index()
+    bucket = _client().bucket(DATASET_BUCKET)
+    samples = []
+    for row in index[offset : offset + limit]:
+        blob = _resolve_sample_blob(bucket, row["sample_id"])
+        samples.append(json.loads(blob.download_as_text()))
+    return {"samples": samples, "total": len(index)}
 
 
 def get_audio_bytes(sample_id: str) -> bytes:
@@ -97,6 +115,7 @@ def update_sample_label(
     record["status"] = status
     record["reviewed_by"] = "human"
 
+    blob.metadata = {"status": status}
     blob.upload_from_string(
         json.dumps(record, ensure_ascii=False, indent=2),
         content_type="application/json",

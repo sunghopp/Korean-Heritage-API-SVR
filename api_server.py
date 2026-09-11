@@ -318,9 +318,11 @@ async def dataset_stats():
 
 
 @app.get("/dataset/samples")
-async def dataset_samples(limit: int = 100):
-    """Data-flywheel dashboard: recent training samples."""
-    return {"samples": await asyncio.to_thread(list_samples, limit)}
+async def dataset_samples(limit: int = 20, offset: int = 0):
+    """Data-flywheel dashboard: one page of training samples, newest first."""
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    return await asyncio.to_thread(list_samples, limit=limit, offset=offset)
 
 
 @app.get("/dataset/audio/{sample_id}")

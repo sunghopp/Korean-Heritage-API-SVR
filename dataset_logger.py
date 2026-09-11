@@ -74,6 +74,9 @@ def save_training_sample(
         audio_blob = bucket.blob(audio_blob_path)
         audio_blob.upload_from_filename(audio_path)
 
+        text_blob = bucket.blob(f"{DATASET_TEXT_PREFIX}/{sample_id}.json")
+        text_blob.metadata = {"status": status}
+
         record = {
             "id": sample_id,
             "audio_filepath": audio_blob_path,
@@ -89,7 +92,6 @@ def save_training_sample(
             "reviewed_by": reviewed_by,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        text_blob = bucket.blob(f"{DATASET_TEXT_PREFIX}/{sample_id}.json")
         text_blob.upload_from_string(
             json.dumps(record, ensure_ascii=False, indent=2),
             content_type="application/json",
