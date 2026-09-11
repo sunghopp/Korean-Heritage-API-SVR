@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import os
 import tempfile
 import time
@@ -135,8 +136,8 @@ def transcribe_jeju(audio_path: str) -> tuple[str, float]:
         clean_up_tokenization_spaces=False,
     )[0].strip()
 
-    # 데이터셋 저장 시 학습 가능 여부를 가르는 confidence: 토큰별 평균 로그확률을 exp()로
-    # 0~1 확률값으로 변환한다 (dataset_logger.save_training_sample의 티어 분류 기준).
+    # 데이터셋 저장 시 status(pending/approved) 판정에 쓰이는 STT confidence: 토큰별
+    # 평균 로그확률을 exp()로 0~1 확률값으로 변환한다 (dataset_logger.save_training_sample 참고).
     transition_scores = stt_model.compute_transition_scores(
         output.sequences, output.scores, normalize_logits=True
     )
@@ -146,7 +147,7 @@ def transcribe_jeju(audio_path: str) -> tuple[str, float]:
     return transcript, confidence
 
 
-def call_gemini_ars(jeju_text: str) -> GeminiARSResult:
+def call_gemini_ars(jeju_text: str) -> tuple[GeminiARSResult, float]:
     response = gemini_client.models.generate_content(
         model=GEMINI_TUNED_ENDPOINT,
         contents=build_few_shot_contents(jeju_text),
@@ -158,13 +159,19 @@ def call_gemini_ars(jeju_text: str) -> GeminiARSResult:
             thinking_config=types.ThinkingConfig(thinking_budget=0),
             response_mime_type="application/json",
             response_schema=GeminiARSResult,
+            response_logprobs=True,
         ),
     )
 
+    # STT confidence(transcribe_jeju)와 동일한 원리: 응답 토큰의 평균 로그확률을
+    # exp()로 0~1 확률값으로 변환. 값이 없으면(엔드포인트 미지원 등) 0.0으로 폴백.
+    avg_logprobs = response.candidates[0].avg_logprobs if response.candidates else None
+    translation_confidence = math.exp(avg_logprobs) if avg_logprobs is not None else 0.0
+
     if response.parsed is not None:
         if isinstance(response.parsed, GeminiARSResult):
-            return response.parsed
-        return GeminiARSResult.model_validate(response.parsed)
+            return response.parsed, translation_confidence
+        return GeminiARSResult.model_validate(response.parsed), translation_confidence
 
     finish_reason = response.candidates[0].finish_reason if response.candidates else None
     logger.warning(
@@ -175,7 +182,7 @@ def call_gemini_ars(jeju_text: str) -> GeminiARSResult:
 
     if not response.text:
         raise RuntimeError("Gemini가 빈 응답을 반환했습니다.")
-    return GeminiARSResult.model_validate_json(response.text)
+    return GeminiARSResult.model_validate_json(response.text), translation_confidence
 
 
 def synthesize_ars_reply(text: str) -> bytes:
@@ -234,7 +241,7 @@ async def translate_audio(file: UploadFile = File(...)):
             if not jeju_text:
                 raise HTTPException(status_code=422, detail="STT 결과가 비어 있습니다.")
 
-            gemini_result = await asyncio.to_thread(call_gemini_ars, jeju_text)
+            gemini_result, translation_confidence = await asyncio.to_thread(call_gemini_ars, jeju_text)
 
             try:
                 await asyncio.to_thread(
@@ -242,7 +249,8 @@ async def translate_audio(file: UploadFile = File(...)):
                     audio_path=temp_file_path,
                     jeju_text=jeju_text,
                     standard_text=gemini_result.standard_text,
-                    confidence=stt_confidence,
+                    stt_confidence=stt_confidence,
+                    translation_confidence=translation_confidence,
                 )
             except Exception:
                 logger.warning("데이터셋 저장 호출 실패", exc_info=True)

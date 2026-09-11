@@ -53,7 +53,8 @@ def save_training_sample(
     audio_path: str,
     jeju_text: str,
     standard_text: str,
-    confidence: float,
+    stt_confidence: float,
+    translation_confidence: float,
     speaker_id: str = "1",
 ) -> None:
     """Best-effort upload of one (audio, label) pair for future STT training.
@@ -62,7 +63,7 @@ def save_training_sample(
     caller's response. Blocking I/O; run via asyncio.to_thread from async code.
     """
     sample_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
-    if confidence >= 0.8:
+    if stt_confidence >= 0.8 and translation_confidence >= 0.8:
         status, reviewed_by = "approved", "system"
     else:
         status, reviewed_by = "pending", None
@@ -82,7 +83,8 @@ def save_training_sample(
             "speaker_id": speaker_id,
             "note": "",
             "eojeolList": build_eojeol_list(jeju_text, standard_text),
-            "confidence": round(confidence, 4),
+            "stt_confidence": round(stt_confidence, 4),
+            "translation_confidence": round(translation_confidence, 4),
             "status": status,
             "reviewed_by": reviewed_by,
             "created_at": datetime.now(timezone.utc).isoformat(),
