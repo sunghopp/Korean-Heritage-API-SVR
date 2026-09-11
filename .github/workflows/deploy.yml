@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 env:
-  REGION: asia-northeast3
+  REGION: asia-southeast1
   SERVICE_NAME: jeju-backend
   REPOSITORY_ID: jeju-backend
 
