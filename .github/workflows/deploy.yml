@@ -55,7 +55,10 @@ jobs:
             --allow-unauthenticated \
             --port=8080 \
             --cpu=4 \
-            --memory=4Gi \
+            --memory=16Gi \
+            --gpu=1 \
+            --gpu-type=nvidia-l4 \
+            --no-cpu-throttling \
             --timeout=300 \
             --min-instances=0 \
             --max-instances=3 \

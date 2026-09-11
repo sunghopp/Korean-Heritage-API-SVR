@@ -9,7 +9,6 @@ google-cloud-storage
 soundfile
 Cython==0.29.36
 
-# Keep current API server CPU deployment behavior.
-# For Cloud Run GPU, replace this with an appropriate CUDA-enabled PyTorch image/install.
---extra-index-url https://download.pytorch.org/whl/cpu
+# CUDA 지원 빌드를 설치 — GPU가 있으면 자동으로 쓰고(DEVICE 분기, api_server.py 참고),
+# 없으면 torch.cuda.is_available()이 False가 되어 CPU로 동작한다.
 torch
