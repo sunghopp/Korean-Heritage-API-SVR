@@ -32,6 +32,10 @@ from dataset_dashboard import (
 from dataset_logger import save_training_sample
 from tts_engine import JejuVITSEngine
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -229,9 +233,17 @@ async def translate_audio(file: UploadFile = File(...)):
     start_time = time.time()
     suffix = Path(file.filename or "input.wav").suffix or ".wav"
 
+    audio_bytes = await file.read()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
+        tmp.write(audio_bytes)
         temp_file_path = tmp.name
+
+    logger.info(
+        "업로드 수신: filename=%s content_type=%s size=%d bytes",
+        file.filename,
+        file.content_type,
+        len(audio_bytes),
+    )
 
     try:
         # Model objects share CPU/GPU memory. Serialize demo requests to avoid
@@ -269,6 +281,13 @@ async def translate_audio(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as exc:
+        logger.error(
+            "AI ARS 처리 실패: file=%s temp_path=%s size=%s",
+            file.filename,
+            temp_file_path,
+            os.path.getsize(temp_file_path) if os.path.exists(temp_file_path) else "N/A",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail=f"AI ARS 처리 실패: {exc}") from exc
     finally:
         try:
@@ -302,6 +321,7 @@ async def tts_only(request: TTSRequest):
         try:
             wav_bytes = await asyncio.to_thread(synthesize_ars_reply, request.text.strip())
         except Exception as exc:
+            logger.error("TTS 생성 실패: text=%r", request.text, exc_info=True)
             raise HTTPException(status_code=500, detail=f"TTS 생성 실패: {exc}") from exc
 
     return Response(
@@ -314,7 +334,11 @@ async def tts_only(request: TTSRequest):
 @app.get("/dataset/stats")
 async def dataset_stats():
     """Data-flywheel dashboard: counts per review status."""
-    return await asyncio.to_thread(get_stats)
+    try:
+        return await asyncio.to_thread(get_stats)
+    except Exception as exc:
+        logger.error("데이터셋 통계 조회 실패", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"데이터셋 통계 조회 실패: {exc}") from exc
 
 
 @app.get("/dataset/samples")
@@ -322,7 +346,13 @@ async def dataset_samples(limit: int = 20, offset: int = 0):
     """Data-flywheel dashboard: one page of training samples, newest first."""
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
-    return await asyncio.to_thread(list_samples, limit=limit, offset=offset)
+    try:
+        return await asyncio.to_thread(list_samples, limit=limit, offset=offset)
+    except Exception as exc:
+        logger.error(
+            "데이터셋 샘플 목록 조회 실패: limit=%s offset=%s", limit, offset, exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=f"데이터셋 샘플 목록 조회 실패: {exc}") from exc
 
 
 @app.get("/dataset/audio/{sample_id}")
@@ -332,6 +362,9 @@ async def dataset_audio(sample_id: str):
         audio_bytes = await asyncio.to_thread(get_audio_bytes, sample_id)
     except NotFound:
         raise HTTPException(status_code=404, detail="오디오를 찾을 수 없습니다.")
+    except Exception as exc:
+        logger.error("오디오 조회 실패: sample_id=%s", sample_id, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"오디오 조회 실패: {exc}") from exc
     return Response(content=audio_bytes, media_type="audio/wav")
 
 
@@ -356,4 +389,12 @@ async def update_dataset_sample(sample_id: str, payload: DatasetLabelUpdate):
         )
     except NotFound:
         raise HTTPException(status_code=404, detail="데이터를 찾을 수 없습니다.")
+    except Exception as exc:
+        logger.error(
+            "데이터셋 샘플 갱신 실패: sample_id=%s payload=%s",
+            sample_id,
+            payload.model_dump(),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"데이터셋 샘플 갱신 실패: {exc}") from exc
     return updated
