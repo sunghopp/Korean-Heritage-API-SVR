@@ -172,6 +172,8 @@ curl http://localhost:8080/health
 GCP_PROJECT_ID=385248657749
 GCP_LOCATION=us-central1
 GEMINI_TUNED_ENDPOINT=projects/385248657749/locations/us-central1/endpoints/7571681821318971392
+LORA_MODEL_PATH=gs://malmoi-jeju-dataset-2026/whisper-model-weights/whisper-jeju-lora-final
+LORA_MODEL_CACHE_PATH=/tmp/whisper-jeju-lora-final
 TTS_CHECKPOINT_PATH=gs://malmoi-jeju-dataset-2026/tts/jeju_vits.pth
 ```
 
@@ -223,7 +225,7 @@ GPU가 없으면 자동으로 CPU로 동작합니다(`api_server.py`의 `DEVICE`
 │   └── tts/
 │       ├── README.md
 │       └── jeju_vits.pth       # 사용자가 추가
-├── whisper-jeju-lora-final/
+├── gcs_model_loader.py
 ├── requirements.txt
 ├── Dockerfile
 ├── .dockerignore
@@ -261,7 +263,15 @@ TTS_CHECKPOINT_CACHE_PATH=/tmp/jeju_vits.pth
 
 Cloud Run에서 사용하는 런타임 서비스 계정에는 버킷의 해당 객체를 읽을 수 있는 권한(`storage.objects.get`, 일반적으로 Storage Object Viewer 역할)이 필요합니다.
 
-STT LoRA 로딩 방식은 이번 변경에서 수정하지 않았습니다.
+## STT LoRA 가중치: Google Cloud Storage 로딩
+
+STT LoRA 가중치는 로컬 저장소나 Docker 이미지에 포함하지 않고 아래 GCS prefix에서 시작 시 로드합니다.
+
+```text
+gs://malmoi-jeju-dataset-2026/whisper-model-weights/whisper-jeju-lora-final
+```
+
+프로세스 시작 시 prefix 아래 파일을 `/tmp/whisper-jeju-lora-final`에 다운로드한 뒤 PEFT 모델을 적재합니다. Cloud Run 서비스 계정에는 해당 prefix의 객체를 읽을 수 있는 `storage.objects.get` 권한(일반적으로 Storage Object Viewer)이 필요합니다. 로컬 테스트에서 다른 경로를 사용하려면 `LORA_MODEL_PATH`에 로컬 디렉터리 또는 다른 `gs://` prefix를 지정할 수 있습니다.
 
 ## 학습 데이터셋 자동 저장: Google Cloud Storage 업로드
 

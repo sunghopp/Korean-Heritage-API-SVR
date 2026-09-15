@@ -30,6 +30,8 @@ COPY . .
 ENV PORT=8080 \
     VITS_ROOT=/opt/vits \
     TTS_CONFIG_PATH=/app/tts_config/jeju_vits.json \
+    LORA_MODEL_PATH=gs://malmoi-jeju-dataset-2026/whisper-model-weights/whisper-jeju-lora-final \
+    LORA_MODEL_CACHE_PATH=/tmp/whisper-jeju-lora-final \
     TTS_CHECKPOINT_PATH=gs://malmoi-jeju-dataset-2026/tts/jeju_vits.pth \
     TTS_CHECKPOINT_CACHE_PATH=/tmp/jeju_vits.pth
 
