@@ -1,3 +1,4 @@
 __pycache__
 *.pyc
 .venv
+whisper-jeju-lora-final/

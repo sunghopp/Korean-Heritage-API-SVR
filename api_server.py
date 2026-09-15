@@ -30,6 +30,7 @@ from dataset_dashboard import (
     update_sample_label,
 )
 from dataset_logger import save_training_sample
+from gcs_model_loader import load_lora_model_path
 from tts_engine import JejuVITSEngine
 
 logging.basicConfig(
@@ -53,7 +54,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LORA_MODEL_PATH = os.getenv("LORA_MODEL_PATH", "./whisper-jeju-lora-final")
+LORA_MODEL_PATH = load_lora_model_path()
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "385248657749")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 GEMINI_TUNED_ENDPOINT = os.getenv(
@@ -84,6 +85,7 @@ class TTSRequest(BaseModel):
 # 2. Models: load once at process startup
 # ==========================================
 print(f"서버 구동 준비: STT 모델 적재 중... device={DEVICE}")
+print(f"STT 모델 경로: {LORA_MODEL_PATH}")
 stt_config = PeftConfig.from_pretrained(LORA_MODEL_PATH)
 base_model_name = stt_config.base_model_name_or_path
 processor = WhisperProcessor.from_pretrained(base_model_name)
