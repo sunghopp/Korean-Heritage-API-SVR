@@ -91,6 +91,10 @@ def save_training_sample(
             "status": status,
             "reviewed_by": reviewed_by,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "training_status": {
+                "stt": {"promoted": False, "last_snapshot_id": None, "last_trained_at": None},
+                "gemini": {"promoted": False, "last_snapshot_id": None, "last_trained_at": None},
+            },
         }
         text_blob.upload_from_string(
             json.dumps(record, ensure_ascii=False, indent=2),
