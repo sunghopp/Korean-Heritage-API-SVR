@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from google.cloud import storage
+from google.cloud import firestore, storage
 
 from dataset_logger import build_eojeol_list
 
@@ -11,9 +11,12 @@ DATASET_BUCKET = os.getenv("DATASET_BUCKET", "malmoi-jeju-dataset-2026")
 DATASET_AUDIO_PREFIX = os.getenv("DATASET_AUDIO_PREFIX", "dataset/extracted/Audio")
 DATASET_TEXT_PREFIX = os.getenv("DATASET_TEXT_PREFIX", "dataset/extracted/Text")
 
+SAMPLES_COLLECTION = os.getenv("DATASET_FIRESTORE_COLLECTION", "dataset_samples")
+
 STATUSES = ("pending", "approved", "rejected")
 
 _storage_client: storage.Client | None = None
+_firestore_client: firestore.Client | None = None
 
 
 def _client() -> storage.Client:
@@ -23,46 +26,32 @@ def _client() -> storage.Client:
     return _storage_client
 
 
-def _list_sample_index() -> list[dict]:
-    """List every sample's id/status without downloading its JSON body.
+def samples_collection() -> firestore.CollectionReference:
+    global _firestore_client
+    if _firestore_client is None:
+        _firestore_client = firestore.Client()
+    return _firestore_client.collection(SAMPLES_COLLECTION)
 
-    GCS includes each blob's custom metadata in the listing response itself,
-    so this needs one metadata-only pass over the bucket instead of
-    downloading every record just to sort/count them. sample_id embeds a UTC
-    timestamp prefix (see dataset_logger.save_training_sample), so sorting
-    the id string descending is equivalent to sorting by created_at
-    descending. Samples saved before this metadata existed fall back to
-    "pending" until they're next touched by update_sample_label.
-    """
-    bucket = _client().bucket(DATASET_BUCKET)
-    index: list[dict] = []
-    for blob in bucket.list_blobs(prefix=f"{DATASET_TEXT_PREFIX}/"):
-        if not blob.name.endswith(".json"):
-            continue
-        sample_id = blob.name.rsplit("/", 1)[-1].removesuffix(".json")
-        status = (blob.metadata or {}).get("status", "pending")
-        index.append({"sample_id": sample_id, "status": status})
-    index.sort(key=lambda r: r["sample_id"], reverse=True)
-    return index
+
+def _count(query) -> int:
+    return query.count().get()[0][0].value
 
 
 def get_stats() -> dict:
-    index = _list_sample_index()
-    status_counts = {status: 0 for status in STATUSES}
-    for row in index:
-        if row["status"] in status_counts:
-            status_counts[row["status"]] += 1
-    return {"total": len(index), **status_counts}
+    col = samples_collection()
+    counts = {
+        status: _count(col.where(filter=firestore.FieldFilter("status", "==", status)))
+        for status in STATUSES
+    }
+    return {"total": _count(col), **counts}
 
 
 def list_samples(*, limit: int = 20, offset: int = 0) -> dict:
-    index = _list_sample_index()
-    bucket = _client().bucket(DATASET_BUCKET)
-    samples = []
-    for row in index[offset : offset + limit]:
-        blob = _resolve_sample_blob(bucket, row["sample_id"])
-        samples.append(json.loads(blob.download_as_text()))
-    return {"samples": samples, "total": len(index)}
+    """One page of samples, newest first. sample_id embeds a UTC timestamp
+    prefix (see dataset_logger.save_training_sample), so id desc == created_at desc."""
+    col = samples_collection()
+    docs = col.order_by("id", direction=firestore.Query.DESCENDING).offset(offset).limit(limit)
+    return {"samples": [d.to_dict() for d in docs.stream()], "total": _count(col)}
 
 
 def get_audio_bytes(sample_id: str) -> bytes:
@@ -120,4 +109,5 @@ def update_sample_label(
         json.dumps(record, ensure_ascii=False, indent=2),
         content_type="application/json",
     )
+    samples_collection().document(sample_id).set(record)
     return record
