@@ -100,5 +100,9 @@ def save_training_sample(
             json.dumps(record, ensure_ascii=False, indent=2),
             content_type="application/json",
         )
+        # Dashboard reads from Firestore; GCS stays the source for training.
+        from dataset_dashboard import samples_collection
+
+        samples_collection().document(sample_id).set(record)
     except Exception:
         logger.warning("학습 데이터셋 저장 실패 (sample_id=%s)", sample_id, exc_info=True)
