@@ -103,7 +103,19 @@ end guard          enabled
 
 ### `POST /translate`
 
-기존과 동일하게 `multipart/form-data`의 `file`로 음성을 전송합니다.
+`multipart/form-data`로 음성 `file`을 전송합니다. 발표용 Web Demo는 선택 필드 `history`에
+완료된 최근 대화 최대 5턴을 JSON 배열로 함께 보냅니다. API는 별도 서버 세션을 만들지 않고
+이 이력을 Gemini 프롬프트에 포함하므로 Cloud Run 인스턴스가 바뀌어도 현재 브라우저의 대화 문맥이 이어집니다.
+
+`history` 항목 형식:
+
+```json
+{
+  "jeju_text": "사용자 제주어 STT 결과",
+  "standard_text": "표준어 번역",
+  "ars_reply_jeju": "AI 제주어 답변"
+}
+```
 
 예:
 
