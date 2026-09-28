@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import math
 import os
@@ -12,7 +13,7 @@ from typing import Literal
 
 import librosa
 import torch
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from google import genai
@@ -75,6 +76,14 @@ INFERENCE_LOCK = asyncio.Lock()
 class GeminiARSResult(BaseModel):
     standard_text: str = Field(description="입력 제주어를 자연스러운 표준어로 번역한 결과")
     ars_reply_jeju: str = Field(description="Demo 시나리오를 참고해 생성한 제주어 AI ARS 답변")
+
+
+class ConversationTurn(BaseModel):
+    """One completed user/assistant turn supplied by the demo browser."""
+
+    jeju_text: str = Field(min_length=1, max_length=500)
+    standard_text: str = Field(min_length=1, max_length=500)
+    ars_reply_jeju: str = Field(min_length=1, max_length=1_000)
 
 
 class TTSRequest(BaseModel):
@@ -153,10 +162,16 @@ def transcribe_jeju(audio_path: str) -> tuple[str, float]:
     return transcript, confidence
 
 
-def call_gemini_ars(jeju_text: str) -> tuple[GeminiARSResult, float]:
+def call_gemini_ars(
+    jeju_text: str,
+    conversation_history: list[ConversationTurn],
+) -> tuple[GeminiARSResult, float]:
     response = gemini_client.models.generate_content(
         model=GEMINI_TUNED_ENDPOINT,
-        contents=build_few_shot_contents(jeju_text),
+        contents=build_few_shot_contents(
+            jeju_text,
+            [turn.model_dump() for turn in conversation_history],
+        ),
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
             temperature=0.15,
@@ -206,6 +221,28 @@ def synthesize_ars_reply(text: str) -> bytes:
     )
 
 
+def parse_conversation_history(history_json: str) -> list[ConversationTurn]:
+    """Validate the five most recent browser-owned demo turns.
+
+    The API remains stateless for Cloud Run. The browser is the source of
+    short-lived demo history and sends it with each multipart upload.
+    """
+    try:
+        raw_history = json.loads(history_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="history는 JSON 배열이어야 합니다.") from exc
+
+    if not isinstance(raw_history, list):
+        raise HTTPException(status_code=422, detail="history는 JSON 배열이어야 합니다.")
+    if len(raw_history) > 5:
+        raise HTTPException(status_code=422, detail="history는 최근 5턴까지만 보낼 수 있습니다.")
+
+    try:
+        return [ConversationTurn.model_validate(turn) for turn in raw_history]
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="history 항목 형식이 올바르지 않습니다.") from exc
+
+
 # ==========================================
 # 4. Endpoints
 # ==========================================
@@ -223,7 +260,10 @@ def health():
 
 
 @app.post("/translate")
-async def translate_audio(file: UploadFile = File(...)):
+async def translate_audio(
+    file: UploadFile = File(...),
+    history: str = Form("[]"),
+):
     """Single-call AI ARS pipeline.
 
     Web audio -> Whisper Jeju STT -> tuned Gemini -> Jeju VITS -> JSON.
@@ -232,6 +272,7 @@ async def translate_audio(file: UploadFile = File(...)):
     both a JSON document and a raw WAV file at the same time. Frontend can turn
     audio_base64 back into a Blob(audio/wav) and play it immediately.
     """
+    conversation_history = parse_conversation_history(history)
     start_time = time.time()
     suffix = Path(file.filename or "input.wav").suffix or ".wav"
 
@@ -255,7 +296,11 @@ async def translate_audio(file: UploadFile = File(...)):
             if not jeju_text:
                 raise HTTPException(status_code=422, detail="STT 결과가 비어 있습니다.")
 
-            gemini_result, translation_confidence = await asyncio.to_thread(call_gemini_ars, jeju_text)
+            gemini_result, translation_confidence = await asyncio.to_thread(
+                call_gemini_ars,
+                jeju_text,
+                conversation_history,
+            )
 
             try:
                 await asyncio.to_thread(

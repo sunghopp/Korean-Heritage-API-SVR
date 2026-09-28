@@ -6,7 +6,7 @@ STT/TTS code so the demo policy can be edited independently.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Mapping, Sequence
 
 from google.genai import types
 
@@ -107,8 +107,11 @@ ARS 답변은 TTS가 그대로 읽으므로 발음 가능한 일반 문장만 �
 """.strip()
 
 
-def build_few_shot_contents(jeju_text: str) -> List[types.Content]:
-    """Build realistic civil-service Q&A turns for few-shot prompting."""
+def build_few_shot_contents(
+    jeju_text: str,
+    conversation_history: Sequence[Mapping[str, str]] = (),
+) -> List[types.Content]:
+    """Build few-shot examples plus the recent browser conversation context."""
     contents: List[types.Content] = []
 
     for category, user_jeju, standard_text, ars_reply in FEW_SHOT_CASES:
@@ -133,6 +136,34 @@ def build_few_shot_contents(jeju_text: str) -> List[types.Content]:
                         text=(
                             f"표준어 번역: {standard_text}\n"
                             f"만덕콜센터 제주어 답변: {ars_reply}"
+                        )
+                    )
+                ],
+            )
+        )
+
+    # Keep roles alternating so Gemini can distinguish prior customer context
+    # from the current request. The API has already schema-validated these
+    # fields and caps the list at five completed turns.
+    for turn in conversation_history:
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text=f"민원인 제주어 질문: {turn['jeju_text']}"
+                    )
+                ],
+            )
+        )
+        contents.append(
+            types.Content(
+                role="model",
+                parts=[
+                    types.Part.from_text(
+                        text=(
+                            f"표준어 번역: {turn['standard_text']}\n"
+                            f"만덕콜센터 제주어 답변: {turn['ars_reply_jeju']}"
                         )
                     )
                 ],
