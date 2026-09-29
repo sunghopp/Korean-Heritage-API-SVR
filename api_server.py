@@ -25,7 +25,7 @@ from peft import PeftConfig, PeftModel
 from pydantic import BaseModel, Field
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-from ars_prompt import SYSTEM_INSTRUCTION, build_few_shot_contents
+from ars_prompt import RAG_SYSTEM_INSTRUCTION, build_prompt
 from dataset_dashboard import (
     get_audio_bytes,
     get_stats,
@@ -118,7 +118,8 @@ gemini_client = genai.Client(
 # 비워두면 RAG를 건너뛰고 기존 Few-Shot만으로 동작한다 (켜고 끄는 스위치).
 RAG_CORPUS = os.getenv("RAG_CORPUS", "").strip()
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
-RAG_DISTANCE_THRESHOLD = float(os.getenv("RAG_DISTANCE_THRESHOLD", "0.5"))
+# 거리 기준: 측정값 기준 맞는 문서 0.16~0.21, 엉뚱한 문서 0.27~0.37
+RAG_DISTANCE_THRESHOLD = float(os.getenv("RAG_DISTANCE_THRESHOLD", "0.25"))
 
 if RAG_CORPUS:
     # 코퍼스 리전은 Gemini 리전(GCP_LOCATION)과 다를 수 있다.
@@ -154,7 +155,7 @@ def retrieve_context(jeju_text: str) -> list[str]:
             ),
         )
     except Exception:
-        logger.exception("RAG 검색 실패 → Few-Shot만으로 진행")
+        logger.exception("RAG 검색 실패 → 기존 Few-Shot으로 진행")
         return []
 
     contexts = list(response.contexts.contexts)
@@ -223,15 +224,21 @@ def call_gemini_ars(
     jeju_text: str,
     conversation_history: list[ConversationTurn],
 ) -> tuple[GeminiARSResult, float]:
+    # RAG 결과가 있으면 동적 Few-Shot, 없으면 기존 시퀀스 (ars_prompt.build_prompt)
+    system_instruction, contents = build_prompt(
+        jeju_text,
+        [turn.model_dump() for turn in conversation_history],
+        references=retrieve_context(jeju_text),
+    )
+    if system_instruction == RAG_SYSTEM_INSTRUCTION:
+        logger.info("프롬프트: 동적 Few-Shot %d쌍", (len(contents) - 1) // 2 - len(conversation_history))
+    else:
+        logger.info("프롬프트: 기존 Few-Shot (RAG 예시 없음)")
     response = gemini_client.models.generate_content(
         model=GEMINI_TUNED_ENDPOINT,
-        contents=build_few_shot_contents(
-            jeju_text,
-            [turn.model_dump() for turn in conversation_history],
-            references=retrieve_context(jeju_text),
-        ),
+        contents=contents,
         config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
+            system_instruction=system_instruction,
             temperature=0.15,
             top_p=0.8,
             max_output_tokens=2048,
