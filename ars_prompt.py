@@ -6,6 +6,7 @@ STT/TTS code so the demo policy can be edited independently.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import re
 from typing import List, Mapping, Optional, Sequence, Tuple
 
@@ -206,39 +207,98 @@ RAG_SYSTEM_INSTRUCTION = """
 - ars_reply_jeju: 예시 답변과 같은 제주어 말투로 작성한 상담 답변
 """.strip()
 
-_TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.M)
+_SECTION_RE = re.compile(
+    r"(?P<questions>관련\s*질문\s*예시)"
+    r"|(?P<standard>안내\s*정보)"
+    r"|(?P<jeju>제주어\s*안내\s*문구)"
+)
+_SECTION_ORDER = ("questions", "standard", "jeju")
+_QUESTION_LABEL_RE = re.compile(r"^\(\s*제주어\s*/\s*표준어\s*\)")
+_QPAIR_RE = re.compile(r"([^?]+\?)\s*/\s*([^?]+\?)")
+_ANSWER_RE = re.compile(r"([^.]+?다\.)")
+_LEAD = " \t\r\n-*•#"
+# rag_docs_v3 has exactly four aligned examples in every source document.
+# Retrieval chunks must not be treated as complete documents just because
+# one or more pairs happen to be readable.
+_EXPECTED_PAIRS = 4
 
 
-def _section(text: str, heading: str) -> List[str]:
-    """'## heading' 아래의 '- ' 항목들을 순서대로 돌려준다."""
-    m = re.search(r"^##\s+" + re.escape(heading) + r".*?$\n(.*?)(?=^##\s|\Z)", text, re.M | re.S)
-    if not m:
-        return []
-    return [ln[2:].strip() for ln in m.group(1).splitlines() if ln.startswith("- ")]
+@dataclass
+class _ParsedReference:
+    category: str
+    pairs: List[Tuple[str, str, str]] = field(default_factory=list)
+    reason: str = ""
+    sections: Tuple[str, ...] = ()
+    question_count: Optional[int] = None
+    answer_count: Optional[int] = None
 
 
-def parse_reference(text: str) -> Tuple[str, List[Tuple[str, str, str]]]:
-    """RAG 문서 한 개 → (민원 분야, [(제주어 질문, 표준어 번역, 제주어 답변), ...]).
+def _category(text: str, source_name: str) -> str:
+    """Use the source filename, or a title bounded by the first section."""
+    stem = re.sub(r"\.md$", "", source_name.rsplit("/", 1)[-1], flags=re.I)
+    if "_" in stem:
+        major, minor = (part.strip() for part in stem.split("_", 1))
+        if major and minor:
+            return f"{major} > {minor}"
+    first_section = _SECTION_RE.search(text)
+    title = text[:first_section.start()] if first_section else text
+    match = re.fullmatch(r"([^>\r\n]+?)\s*>\s*([^>\r\n]+)", title.strip(_LEAD))
+    return f"{match[1].strip()} > {match[2].strip()}" if match else ""
 
-    문서 형식 (rag_docs_v3):
-      # 대분류 > 세부유형
-      ## 관련 질문 예시 (제주어 / 표준어)   - 제주어 / 표준어
-      ## 안내 정보                          - 표준어 답변 (사용하지 않음)
-      ## 제주어 안내 문구                   - 제주어 답변
-    질문과 답변은 같은 순서로 짝지어져 있다. 형식이 맞지 않으면 빈 목록.
+
+def _read_items(text: str, pattern: re.Pattern) -> Tuple[List[Tuple[str, ...]], bool]:
+    """Consume every item in order; never skip an unparseable fragment."""
+    remaining = text.strip(_LEAD)
+    items = []
+    while remaining:
+        match = pattern.match(remaining)
+        if not match:
+            return items, False
+        values = tuple(value.strip(_LEAD) for value in match.groups())
+        if any(not value[:-1].strip() for value in values):
+            return items, False
+        items.append(values)
+        remaining = remaining[match.end():].strip(_LEAD)
+    return items, True
+
+
+def _parse_reference(text: str, source_name: str) -> _ParsedReference:
+    result = _ParsedReference(category=_category(text, source_name))
+    headings = list(_SECTION_RE.finditer(text))
+    result.sections = tuple(match.lastgroup for match in headings)
+    if result.sections != _SECTION_ORDER:
+        result.reason = "missing_repeated_or_out_of_order_sections"
+        return result
+
+    question_heading, standard_heading, jeju_heading = headings
+    question_text = text[question_heading.end():standard_heading.start()].strip(_LEAD)
+    question_text = _QUESTION_LABEL_RE.sub("", question_text, count=1)
+    answer_text = text[jeju_heading.end():]
+    questions, questions_complete = _read_items(question_text, _QPAIR_RE)
+    answers, answers_complete = _read_items(answer_text, _ANSWER_RE)
+    result.question_count = len(questions)
+    result.answer_count = len(answers)
+
+    if not questions_complete or not answers_complete:
+        result.reason = "unparsed_question_or_answer_text"
+    elif len(questions) != _EXPECTED_PAIRS or len(answers) != _EXPECTED_PAIRS:
+        result.reason = "expected_four_aligned_pairs"
+    else:
+        result.pairs = [(jq, sq, answer[0]) for (jq, sq), answer in zip(questions, answers)]
+    return result
+
+
+def parse_reference(
+    text: str, source_name: str = "",
+) -> Tuple[str, List[Tuple[str, str, str]]]:
+    """RAG v3 전체 문서 → (민원 분야, 제주어 질문/표준어 번역/제주어 답변 4쌍).
+
+    Markdown 기호와 줄바꿈에 의존하지 않는다. 질문은 '?'로 끝나고
+    제주어 답변은 내부 마침표 없이 '다.'로 끝난다는 v3 형식을 검증한다.
+    불완전하거나 모호한 청크는 부분적으로 짝짓지 않고 빈 목록을 반환한다.
     """
-    title = _TITLE_RE.search(text)
-    category = title.group(1) if title else ""
-    questions = _section(text, "관련 질문 예시")
-    answers = _section(text, "제주어 안내 문구")
-    pairs = []
-    for q_line, jeju_answer in zip(questions, answers):
-        if " / " not in q_line:
-            continue
-        jeju_q, std_q = (part.strip() for part in q_line.split(" / ", 1))
-        if jeju_q and std_q and jeju_answer:
-            pairs.append((jeju_q, std_q, jeju_answer))
-    return category, pairs
+    result = _parse_reference(text, source_name)
+    return result.category, result.pairs
 
 
 def _turn(role: str, text: str) -> types.Content:
@@ -248,15 +308,19 @@ def _turn(role: str, text: str) -> types.Content:
 def build_prompt(
     jeju_text: str,
     conversation_history: Sequence[Mapping[str, str]] = (),
-    references: Optional[List[str]] = None,
+    references: Optional[Sequence[str | Tuple[str, str]]] = None,
 ) -> Tuple[str, List[types.Content]]:
     """(system_instruction, contents)를 만든다.
 
-    references: RAG 검색 결과 텍스트, 관련도 높은 순.
+    references: 관련도 높은 순의 RAG 검색 결과. 텍스트 또는 (파일명, 텍스트).
     쓸 수 있는 예시가 하나도 없으면 기존 시퀀스를 그대로 돌려준다.
     """
-    parsed = [parse_reference(t) for t in (references or [])]
-    parsed = [(cat, pairs) for cat, pairs in parsed if pairs]
+    parsed = []
+    for reference in references or ():
+        source_name, text = reference if isinstance(reference, tuple) else ("", reference)
+        result = _parse_reference(text, source_name)
+        if result.pairs:
+            parsed.append((result.category, result.pairs))
     if not parsed:
         return SYSTEM_INSTRUCTION, build_few_shot_contents(jeju_text, conversation_history)
 
