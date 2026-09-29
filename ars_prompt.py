@@ -7,10 +7,13 @@ STT/TTS code so the demo policy can be edited independently.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import re
 from typing import List, Mapping, Optional, Sequence, Tuple
 
 from google.genai import types
+
+logger = logging.getLogger(__name__)
 
 
 DEMO_SCENARIO = """
@@ -321,6 +324,14 @@ def build_prompt(
         result = _parse_reference(text, source_name)
         if result.pairs:
             parsed.append((result.category, result.pairs))
+        else:
+            logger.warning(
+                "RAG 문서 형식을 읽지 못함: source=%r reason=%s chars=%d "
+                "sections=%s questions=%s answers=%s head=%r tail=%r",
+                source_name, result.reason, len(text), result.sections,
+                result.question_count, result.answer_count,
+                text[:300], text[-300:] if len(text) > 300 else "",
+            )
     if not parsed:
         return SYSTEM_INSTRUCTION, build_few_shot_contents(jeju_text, conversation_history)
 

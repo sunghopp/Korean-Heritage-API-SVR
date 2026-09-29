@@ -163,7 +163,15 @@ def retrieve_context(jeju_text: str) -> list[tuple[str, str]]:
         "RAG 검색 %d건 (%.0fms): %s",
         len(contexts),
         (time.perf_counter() - started) * 1000,
-        [(c.source_display_name, round(c.score, 3)) for c in contexts],
+        [
+            {
+                "source": c.source_display_name,
+                "uri": c.source_uri,
+                "score": round(c.score, 3),
+                "chars": len(c.text),
+            }
+            for c in contexts
+        ],
     )
     return [(c.source_display_name, c.text) for c in contexts]
 
