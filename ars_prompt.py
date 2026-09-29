@@ -6,7 +6,7 @@ STT/TTS code so the demo policy can be edited independently.
 """
 from __future__ import annotations
 
-from typing import List, Mapping, Sequence
+from typing import List, Mapping, Optional, Sequence
 
 from google.genai import types
 
@@ -110,6 +110,7 @@ ARS 답변은 TTS가 그대로 읽으므로 발음 가능한 일반 문장만 �
 def build_few_shot_contents(
     jeju_text: str,
     conversation_history: Sequence[Mapping[str, str]] = (),
+    references: Optional[List[str]] = None,
 ) -> List[types.Content]:
     """Build few-shot examples plus the recent browser conversation context."""
     contents: List[types.Content] = []
@@ -170,12 +171,23 @@ def build_few_shot_contents(
             )
         )
 
+    # [RAG] 검색된 참고 자료가 있으면 질문 앞에 붙인다. 없으면 기존과 완전히 동일.
+    reference_block = ""
+    if references:
+        reference_block = (
+            "[참고 자료]\n"
+            "아래는 만덕콜센터 안내 자료입니다. 질문에 해당하는 내용이 있으면 이 자료에 근거해 답하고, "
+            "질문에 대한 답이 자료에 없으면 지어내지 말고 담당 부서나 만덕콜센터 문의를 안내하세요.\n\n"
+            + "\n\n---\n\n".join(references)
+            + "\n[참고 자료 끝]\n\n"
+        )
+
     contents.append(
         types.Content(
             role="user",
             parts=[
                 types.Part.from_text(
-                    text=f"민원인 제주어 질문: {jeju_text}"
+                    text=f"{reference_block}민원인 제주어 질문: {jeju_text}"
                 )
             ],
         )

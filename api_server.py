@@ -19,6 +19,8 @@ from fastapi.responses import Response
 from google import genai
 from google.api_core.exceptions import NotFound
 from google.genai import types
+import agentplatform
+from agentplatform import rag
 from peft import PeftConfig, PeftModel
 from pydantic import BaseModel, Field
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
@@ -109,6 +111,61 @@ gemini_client = genai.Client(
     http_options=types.HttpOptions(api_version="v1"),
 )
 
+# ==========================================
+# [RAG] 만덕콜센터 안내 자료 검색
+# ==========================================
+# RAG_CORPUS 예: projects/385248657749/locations/asia-southeast1/ragCorpora/1234567890
+# 비워두면 RAG를 건너뛰고 기존 Few-Shot만으로 동작한다 (켜고 끄는 스위치).
+RAG_CORPUS = os.getenv("RAG_CORPUS", "").strip()
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+RAG_DISTANCE_THRESHOLD = float(os.getenv("RAG_DISTANCE_THRESHOLD", "0.5"))
+
+if RAG_CORPUS:
+    # 코퍼스 리전은 Gemini 리전(GCP_LOCATION)과 다를 수 있다.
+    # (RAG Engine은 신규 프로젝트에서 us-central1이 allowlist 전용)
+    # → 리소스 이름 projects/.../locations/{리전}/ragCorpora/... 에서 리전을 꺼내 쓴다.
+    _rag_parts = RAG_CORPUS.split("/")
+    RAG_LOCATION = (
+        _rag_parts[_rag_parts.index("locations") + 1]
+        if "locations" in _rag_parts
+        else GCP_LOCATION
+    )
+    agentplatform.init(project=GCP_PROJECT_ID, location=RAG_LOCATION)
+    logger.info(
+        "RAG 활성화: corpus=%s location=%s top_k=%s",
+        RAG_CORPUS, RAG_LOCATION, RAG_TOP_K,
+    )
+else:
+    logger.info("RAG 비활성화: RAG_CORPUS 미설정")
+
+
+def retrieve_context(jeju_text: str) -> list[str]:
+    """질문과 뜻이 가까운 안내 자료를 최대 RAG_TOP_K개 가져온다. 실패하면 빈 목록."""
+    if not RAG_CORPUS or not jeju_text.strip():
+        return []
+    started = time.perf_counter()
+    try:
+        response = rag.retrieval_query(
+            text=jeju_text,
+            rag_resources=[rag.RagResource(rag_corpus=RAG_CORPUS)],
+            rag_retrieval_config=rag.RagRetrievalConfig(
+                top_k=RAG_TOP_K,
+                filter=rag.Filter(vector_distance_threshold=RAG_DISTANCE_THRESHOLD),
+            ),
+        )
+    except Exception:
+        logger.exception("RAG 검색 실패 → Few-Shot만으로 진행")
+        return []
+
+    contexts = list(response.contexts.contexts)
+    logger.info(
+        "RAG 검색 %d건 (%.0fms): %s",
+        len(contexts),
+        (time.perf_counter() - started) * 1000,
+        [(c.source_display_name, round(c.score, 3)) for c in contexts],
+    )
+    return [c.text for c in contexts]
+
 print("Jeju VITS TTS 모델 적재 중...")
 tts_model = None
 _tts_error = None
@@ -171,6 +228,7 @@ def call_gemini_ars(
         contents=build_few_shot_contents(
             jeju_text,
             [turn.model_dump() for turn in conversation_history],
+            references=retrieve_context(jeju_text),
         ),
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
