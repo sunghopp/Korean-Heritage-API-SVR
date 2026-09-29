@@ -140,8 +140,8 @@ else:
     logger.info("RAG 비활성화: RAG_CORPUS 미설정")
 
 
-def retrieve_context(jeju_text: str) -> list[str]:
-    """질문과 뜻이 가까운 안내 자료를 최대 RAG_TOP_K개 가져온다. 실패하면 빈 목록."""
+def retrieve_context(jeju_text: str) -> list[tuple[str, str]]:
+    """관련 청크를 최대 RAG_TOP_K개 (파일명, 텍스트)로 가져온다. 실패하면 빈 목록."""
     if not RAG_CORPUS or not jeju_text.strip():
         return []
     started = time.perf_counter()
@@ -163,9 +163,17 @@ def retrieve_context(jeju_text: str) -> list[str]:
         "RAG 검색 %d건 (%.0fms): %s",
         len(contexts),
         (time.perf_counter() - started) * 1000,
-        [(c.source_display_name, round(c.score, 3)) for c in contexts],
+        [
+            {
+                "source": c.source_display_name,
+                "uri": c.source_uri,
+                "score": round(c.score, 3),
+                "chars": len(c.text),
+            }
+            for c in contexts
+        ],
     )
-    return [c.text for c in contexts]
+    return [(c.source_display_name, c.text) for c in contexts]
 
 print("Jeju VITS TTS 모델 적재 중...")
 tts_model = None
