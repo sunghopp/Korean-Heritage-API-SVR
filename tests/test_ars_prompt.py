@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import unittest
 
-from ars_prompt import RAG_SYSTEM_INSTRUCTION, build_prompt, parse_reference
+from ars_prompt import RESPONSE_LANGUAGE_POLICY, RAG_SYSTEM_INSTRUCTION, build_prompt, parse_reference
 
 
 QUESTIONS = [
@@ -21,6 +21,16 @@ ANSWERS = ["요금 안내 예시이우다.", "환승 안내 예시이우다.", "
 SOURCE = "교통_대중교통요금.md"
 CATEGORY = "교통 > 대중교통요금"
 EXPECTED = [(jq, sq, answer) for (jq, sq), answer in zip(QUESTIONS, ANSWERS)]
+
+# Expected public prompt payload, independent of the production case list.
+SOCIAL_TURNS = [
+    {"role": "user", "text": "민원 분야: 일상 인사\n민원인 제주어 질문: 안녕하세요. 반갑습니다."},
+    {"role": "model", "text": "표준어 번역: 안녕하세요. 반갑습니다.\n만덕콜센터 제주어 답변: 예, 반갑수다. 궁금한 거 편하게 말씀해줍서."},
+    {"role": "user", "text": "민원 분야: 인사와 민원 의도 확인\n민원인 제주어 질문: 예 반갑수다. 이번에 이디로 이사 와신디 전입신고 하젠 햄수다."},
+    {"role": "model", "text": "표준어 번역: 예 반갑습니다. 이번에 여기로 이사 왔는데 전입신고 하려고 합니다.\n만덕콜센터 제주어 답변: 예, 반갑수다. 전입신고 문의로 확인해드리쿠다."},
+    {"role": "user", "text": "민원 분야: 감사와 상담 마무리\n민원인 제주어 질문: 알았수다 고맙수다"},
+    {"role": "model", "text": "표준어 번역: 알겠습니다. 감사합니다.\n만덕콜센터 제주어 답변: 예, 고맙수다. 다음에도 궁금한 거 편하게 말씀해줍서."},
+]
 
 
 def document(questions=QUESTIONS, answers=ANSWERS):
@@ -123,13 +133,13 @@ class PromptTests(unittest.TestCase):
             (Path(__file__).parent / "fixtures/pre_rag_prompt.json").read_text(encoding="utf-8")
         )
 
-    def test_fallback_matches_frozen_pre_rag_prompt(self):
+    def test_fallback_preserves_legacy_prompt_after_social_additions(self):
         for history_size in (0, 1, 5):
             history = [
                 {"jeju_text": f"이전 질문 {i}", "standard_text": f"번역 {i}", "ars_reply_jeju": f"답변 {i}"}
                 for i in range(history_size)
             ]
-            expected = list(self.snapshot["contents"][:-1])
+            expected = SOCIAL_TURNS + self.snapshot["contents"][:-1]
             for turn in history:
                 expected.extend([
                     {"role": "user", "text": f"민원인 제주어 질문: {turn['jeju_text']}"},
@@ -139,7 +149,7 @@ class PromptTests(unittest.TestCase):
             for refs in (None, [], ["broken"], [(SOURCE, document(answers=ANSWERS[:3]))]):
                 with self.subTest(history_size=history_size, references=refs):
                     system, contents = build_prompt("이번 질문?", history, refs)
-                    self.assertEqual(system, self.snapshot["system_instruction"])
+                    self.assertEqual(system, self.snapshot["system_instruction"] + "\n\n" + RESPONSE_LANGUAGE_POLICY)
                     self.assertEqual(serialize(contents), expected)
 
     def test_dynamic_examples_then_history_then_question(self):
@@ -149,8 +159,9 @@ class PromptTests(unittest.TestCase):
         ])
         turns = serialize(contents)
         self.assertEqual(system, RAG_SYSTEM_INSTRUCTION)
-        self.assertEqual(len(turns), 19)
-        for offset, category in ((0, "생활 > 낮은관련도"), (8, CATEGORY)):
+        self.assertEqual(len(turns), 25)
+        self.assertEqual(turns[:6], SOCIAL_TURNS)
+        for offset, category in ((6, "생활 > 낮은관련도"), (14, CATEGORY)):
             for i, (jq, sq, answer) in enumerate(EXPECTED):
                 self.assertEqual(turns[offset + 2 * i], {
                     "role": "user", "text": f"민원 분야: {category}\n민원인 제주어 질문: {jq}",
@@ -161,7 +172,7 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(turns[-3]["text"], "민원인 제주어 질문: 이전 질문")
         self.assertEqual(turns[-2]["text"], "표준어 번역: 이전 번역\n만덕콜센터 제주어 답변: 이전 답변")
         self.assertEqual(turns[-1], {"role": "user", "text": "민원인 제주어 질문: 이번 질문?"})
-        self.assertEqual([turn["role"] for turn in turns], ["user", "model"] * 9 + ["user"])
+        self.assertEqual([turn["role"] for turn in turns], ["user", "model"] * 12 + ["user"])
         self.assertNotIn("표준어 전용 안내", str(turns))
 
     def test_invalid_reference_does_not_discard_valid_reference(self):
@@ -176,6 +187,40 @@ class PromptTests(unittest.TestCase):
             build_prompt("질문?", references=[document()]),
             build_prompt("질문?", references=[(SOURCE, document())]),
         )
+
+    def test_greetings_keep_question_and_history_in_both_prompt_paths(self):
+        history = [{
+            "jeju_text": "반갑수다", "standard_text": "반갑습니다",
+            "ars_reply_jeju": "반갑습니다. 무엇을 도와드릴까요?",
+        }]
+        for question in (
+            "안녕하세요. 반갑습니다.",
+            "예 반갑수다. 이번에 이디로 이사 와신디 전입신고 하젠 햄수다.",
+            "알았수다 고맙수다",
+            "감사합니다. 인터넷으로도 신청할 수 있나요?",
+        ):
+            for refs in ([], [(SOURCE, document())]):
+                with self.subTest(question=question, rag=bool(refs)):
+                    system, contents = build_prompt(question, history, refs)
+                    turns = serialize(contents)
+                    self.assertEqual(turns[:6], SOCIAL_TURNS)
+                    self.assertEqual(system.count(RESPONSE_LANGUAGE_POLICY), 1)
+                    self.assertIn("이전 대화에 표준어 AI 답변이 있더라도", system)
+                    self.assertIn("감사 뒤에 질문이 이어지면 상담 종료로 간주하지 마세요", system)
+                    self.assertEqual(turns[-3]["text"], "민원인 제주어 질문: 반갑수다")
+                    self.assertEqual(turns[-2]["text"], "표준어 번역: 반갑습니다\n만덕콜센터 제주어 답변: 반갑습니다. 무엇을 도와드릴까요?")
+                    self.assertEqual(turns[-1], {"role": "user", "text": f"민원인 제주어 질문: {question}"})
+
+    def test_social_examples_separate_standard_translation_from_jeju_reply(self):
+        for refs in ([], [(SOURCE, document())]):
+            _, contents = build_prompt("고맙수다", references=refs)
+            for turn in serialize(contents)[:6]:
+                if turn["role"] != "model":
+                    continue
+                translation, reply = turn["text"].split("\n만덕콜센터 제주어 답변: ")
+                self.assertTrue(translation.startswith("표준어 번역: "))
+                self.assertNotRegex(reply, "반갑습니다|감사합니다|알겠습니다|전화주십시오")
+            self.assertIn("표준어 번역: 알겠습니다. 감사합니다.", contents[5].parts[0].text)
 
     def test_partial_parse_logs_reason_and_counts(self):
         text = document(answers=[ANSWERS[0], *ANSWERS[2:]])
