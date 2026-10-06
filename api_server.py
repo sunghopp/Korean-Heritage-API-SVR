@@ -25,7 +25,7 @@ from peft import PeftConfig, PeftModel
 from pydantic import BaseModel, Field
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-from ars_prompt import RAG_SYSTEM_INSTRUCTION, build_prompt
+from ars_prompt import RAG_SYSTEM_INSTRUCTION, SOCIAL_FEW_SHOT_CASES, build_prompt
 from dataset_dashboard import (
     get_audio_bytes,
     get_stats,
@@ -239,7 +239,11 @@ def call_gemini_ars(
         references=retrieve_context(jeju_text),
     )
     if system_instruction == RAG_SYSTEM_INSTRUCTION:
-        logger.info("프롬프트: 동적 Few-Shot %d쌍", (len(contents) - 1) // 2 - len(conversation_history))
+        rag_pair_count = (len(contents) - 1) // 2 - len(conversation_history) - len(SOCIAL_FEW_SHOT_CASES)
+        logger.info(
+            "프롬프트: 동적 Few-Shot %d쌍 (공통 인사 예시 %d쌍)",
+            rag_pair_count, len(SOCIAL_FEW_SHOT_CASES),
+        )
     else:
         logger.info("프롬프트: 기존 Few-Shot (RAG 예시 없음)")
     response = gemini_client.models.generate_content(
