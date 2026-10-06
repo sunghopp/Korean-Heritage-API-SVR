@@ -1,332 +1,141 @@
-# Korean-Heritage-API-SRV — Jeju AI ARS
+# Korean Heritage API Server | Jeju AI ARS
 
-Ajou Univ. 26' Google AI Capstone Project
+![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white) ![PyTorch](https://img.shields.io/badge/PyTorch-inference-ee4c2c?logo=pytorch&logoColor=white) ![Google Cloud](https://img.shields.io/badge/Google%20Cloud-Vertex%20AI%20%7C%20GCS-4285F4?logo=googlecloud&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-ready-2496ed?logo=docker&logoColor=white)
 
-웹에서 받은 음성을 **제주어 STT → 사전 조정 Gemini → 제주어 VITS TTS** 순서로 처리하는 AI ARS API 서버입니다.
+> 제주어 음성을 인식하고 민원 답변을 생성해 제주어 음성으로 반환하는 FastAPI 서버입니다.
 
-## 처리 흐름
+## 프로젝트 목적
 
-```text
-Web 음성 파일
-   ↓
-Whisper Small + Jeju LoRA
-   ↓
-제주어 STT Text
-   ↓
-Tuned Gemini + Few-Shot AI ARS Demo Prompt
-   ├─ ① 표준어 번역
-   └─ ② 제주어 AI ARS 답변
-                ↓
-        Jeju single-speaker VITS
-                ↓
-              WAV
-                ↓
-JSON Response
-  - jeju_text
-  - standard_text
-  - ars_reply_text
-  - audio_base64 (audio/wav)
-```
+Web의 음성 요청을 Whisper 제주어 LoRA, Vertex AI Gemini와 Jeju VITS로 처리합니다. 요청 음성과 라벨은 GCS, 대시보드 샘플은 Firestore에 기록합니다.
 
-## 이번 변경사항
+## 핵심 기능
 
-### 1. Gemini Few-Shot AI ARS
+- POST /translate: 제주어 STT, 표준어 번역, 제주어 ARS 답변, WAV 합성.
+- POST /tts: 텍스트를 WAV로 합성.
+- RAG_CORPUS가 설정되면 RAG Engine에서 안내 자료를 검색합니다. 검색을 못 쓰면 Few-Shot으로 처리합니다.
+- 요청마다 브라우저의 최근 history 최대 5턴을 사용하며 서버 세션은 없습니다.
+- GCS에 발화와 라벨 저장, Firestore에 대시보드 메타데이터 저장.
+- 대시보드 통계·샘플·오디오 조회 및 승인·거부·라벨 수정 API.
+- STT LoRA·TTS checkpoint GCS 로딩, CUDA 자동 사용 및 CPU fallback.
 
-기존에는 Gemini가 제주어를 표준어로 번역한 문자열 하나만 반환했습니다.
+## 아키텍처
 
-이제 `ars_prompt.py`의 Demo 시나리오와 Few-Shot 예시를 함께 전달하고 Gemini가 아래 두 값을 생성합니다.
+~~~mermaid
+sequenceDiagram
+  participant Web
+  participant API as FastAPI
+  participant STT as Whisper + Jeju LoRA
+  participant RAG as Vertex AI RAG
+  participant Gemini as Tuned Gemini
+  participant GCS
+  participant FS as Firestore
+  participant TTS as Jeju VITS
+  Web->>API: POST /translate (file, history)
+  API->>STT: 음성 전사
+  API->>RAG: 설정된 경우 검색
+  alt 검색 결과 사용 가능
+    RAG-->>API: 안내 예시
+  else 미설정·검색 실패·유효 결과 없음
+    API->>API: Few-Shot prompt
+  end
+  API->>Gemini: 질문·history
+  Gemini-->>API: 번역·답변
+  API->>GCS: 음성·라벨 (best effort)
+  API->>FS: 샘플 metadata
+  API->>TTS: 답변 합성
+  TTS-->>API: WAV
+  API-->>Web: JSON + Base64 WAV
+~~~
 
-```json
-{
-  "standard_text": "표준어 번역",
-  "ars_reply_jeju": "제주어 AI ARS 답변"
-}
-```
+요청 추론은 인스턴스에서 직렬화됩니다. 저장 실패는 음성 응답을 중단하지 않습니다.
 
-Few-Shot 시나리오는 `ars_prompt.py`의 다음 두 값만 수정하면 됩니다.
+## 기술 스택
 
-```python
-DEMO_SCENARIO
-FEW_SHOT_EXAMPLES
-```
+FastAPI, Uvicorn, Pydantic, Whisper, PEFT, PyTorch, Transformers, librosa, Google Gen AI SDK, Vertex AI RAG Engine, Jeju VITS, Cloud Storage, Firestore, Docker, Cloud Run.
 
-Gemini 출력은 Pydantic response schema로 구조화합니다.
+## 설치 및 실행
 
-> 기존 `vertexai.generative_models`는 2026-06-24 이후 제거 대상이므로 현재 구현은 `google-genai` SDK를 사용합니다.
+Python 3.11과 Google Cloud ADC가 필요합니다.
 
-## 2. Jeju VITS TTS 연결
+~~~bash
+python -m pip install -r requirements.txt
+python -m uvicorn api_server:app --host 0.0.0.0 --port 8080
+~~~
 
-SageMaker에서 학습한 **Generator 가중치 `G_*.pth` 하나만** 아래 폴더에 추가합니다.
+~~~bash
+docker build -t korean-heritage-api .
+docker run --rm -d --name korean-heritage-api -p 8080:8080 -e PORT=8080 korean-heritage-api
+~~~
 
-```text
-models/tts/jeju_vits.pth
-```
+컨테이너 실행 후:
 
-`D_*.pth`는 추론에 필요하지 않습니다.
-
-선택한 checkpoint는 배포 시 파일명을 `jeju_vits.pth`로 통일하는 것을 권장합니다.
-
-```bash
-cp /path/to/G_XXXX.pth models/tts/jeju_vits.pth
-```
-
-VITS checkpoint가 GitHub 일반 파일 제한을 넘을 수 있으므로 `.gitattributes`에 Git LFS 설정을 추가했습니다.
-
-```bash
-git lfs install
-git lfs track "models/tts/*.pth"
-git add .gitattributes models/tts/jeju_vits.pth
-```
-
-GitHub Actions checkout도 `lfs: true`로 설정되어 있습니다.
-
-TTS config는 학습 당시 사용한 값을 그대로 `tts_config/jeju_vits.json`에 포함했습니다.
-
-Docker 빌드 시 원본 `jaywalnut310/vits` runtime을 `/opt/vits`에 가져오고 commit `2e561ba`로 고정합니다.
-
-### TTS 끝 음절 보호
-
-기존 테스트에서 짧은 문장도 마지막 발음이 잘리는 경우가 있었기 때문에 API용 TTS에는 다음 설정을 기본 적용합니다.
-
-```text
-max chunk chars    45
-length_scale       1.10
-noise_scale_w      0.35
-chunk pause        220 ms
-final tail silence 350 ms
-end guard          enabled
-```
-
-긴 ARS 답변은 자동 분할 후 WAV 하나로 연결합니다.
-
-## API
-
-### `POST /translate`
-
-`multipart/form-data`로 음성 `file`을 전송합니다. 발표용 Web Demo는 선택 필드 `history`에
-완료된 최근 대화 최대 5턴을 JSON 배열로 함께 보냅니다. API는 별도 서버 세션을 만들지 않고
-이 이력을 Gemini 프롬프트에 포함하므로 Cloud Run 인스턴스가 바뀌어도 현재 브라우저의 대화 문맥이 이어집니다.
-
-`history` 항목 형식:
-
-```json
-{
-  "jeju_text": "사용자 제주어 STT 결과",
-  "standard_text": "표준어 번역",
-  "ars_reply_jeju": "AI 제주어 답변"
-}
-```
-
-예:
-
-```bash
-curl -X POST http://localhost:8080/translate \
-  -F "file=@sample.wav"
-```
-
-응답 예:
-
-```json
-{
-  "status": "success",
-  "jeju_text": "상담원 연결해줍서",
-  "standard_text": "상담원 연결해 주세요.",
-  "ars_reply_text": "예, 상담원 연결을 도와드리쿠다. 잠시만 기다려줍서.",
-  "audio_mime_type": "audio/wav",
-  "audio_filename": "ars_reply.wav",
-  "audio_sample_rate": 22050,
-  "audio_base64": "UklGR...",
-  "processing_time": 2.31
-}
-```
-
-하나의 HTTP body에서 JSON과 raw WAV를 동시에 일반 JSON으로 보낼 수 없기 때문에 `/translate`에서는 WAV bytes를 Base64로 넣습니다.
-
-프론트에서는 Base64를 `Blob([bytes], {type: 'audio/wav'})`로 변환해 바로 재생하면 됩니다.
-
-### `POST /tts`
-
-TTS만 테스트할 때 raw `audio/wav`를 바로 반환합니다.
-
-```bash
-curl -X POST http://localhost:8080/tts \
-  -H "Content-Type: application/json" \
-  -d '{"text":"혼저옵서예. 무슨 일로 전화합신가?"}' \
-  --output test.wav
-```
-
-### `GET /health`
-
-STT/Gemini/TTS 로드 상태를 확인합니다.
-
-```bash
+~~~bash
 curl http://localhost:8080/health
-```
+~~~
 
-### `GET /dataset/stats`, `GET /dataset/samples`, `GET /dataset/audio/{sample_id}`, `PATCH /dataset/samples/{tier}/{sample_id}`
-
-프론트엔드 데이터 플라이휠 대시보드용 API입니다. `dataset_dashboard.py`가 GCS의 `dataset/extracted/{Audio,Text}` 아래 저장된 학습 데이터를 다룹니다.
-
-- `GET /dataset/stats` — 티어별/검수상태별 개수 + 총합 (`{"total": ..., "tier1": ..., "tier2": ..., "tier3": ..., "unreviewed": ..., "not_required": ..., "human_verified": ..., "rejected": ...}`). review_status는 파일 경로가 아니라 내용에만 있어 전체 레코드를 다운로드해 집계한다.
-- `GET /dataset/samples?limit=100` — 최신순 정렬된 라벨 레코드 목록 (`{"samples": [...]}`, 모든 티어 포함)
-- `GET /dataset/audio/{sample_id}` — 해당 샘플의 오디오를 GCS에서 받아 `audio/wav`로 그대로 중계 (오디오는 티어 구분 없이 평탄한 경로에 저장되므로 tier 인자 불필요)
-- `PATCH /dataset/samples/{tier}/{sample_id}` — 사람의 검수 결정을 반영할 때 사용. 요청 바디는 `review_status`(`human_verified` 또는 `rejected`, 필수)와 선택적으로 `dialect_form`/`standard_form`(라벨을 함께 고칠 때만). 있는 필드만 갱신하고, 텍스트가 바뀌면 `eojeolList`를 재계산한다. **Tier는 절대 바뀌지 않으므로 파일을 옮기지 않고 같은 경로(`Text/{tier}/{sample_id}.json`)에 덮어쓴다.** 수정된 레코드 전체를 응답으로 반환.
-
-네 엔드포인트 모두 `/translate`, `/tts`와 마찬가지로 **인증 없이 공개**되어 있습니다 — 수집된 사용자 음성/발화 데이터가 URL을 아는 누구에게나 노출되고, 이 PATCH로 아무나 라벨을 고칠 수 있다는 점을 유의하세요.
+서버 시작 때 STT를 적재하며 기본 LoRA·TTS checkpoint는 GCS에서 읽습니다. Dockerfile은 고정한 VITS runtime을 빌드합니다.
 
 ## 환경 변수
 
-`.env.example` 참고.
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| PORT | 8080 (Docker) | 서버 포트 |
+| GCP_PROJECT_ID, GCP_LOCATION | 385248657749, us-central1 | Vertex AI |
+| GEMINI_TUNED_ENDPOINT | 코드 기본 endpoint | Gemini endpoint |
+| CORS_ORIGINS | * | 허용 origin 목록 |
+| LORA_MODEL_PATH | 운영 GCS prefix | STT adapter 경로 |
+| LORA_MODEL_CACHE_PATH | /tmp/whisper-jeju-lora-final | adapter cache |
+| TTS_CONFIG_PATH | ./tts_config/jeju_vits.json | VITS config |
+| TTS_CHECKPOINT_PATH | GCS의 tts/jeju_vits.pth | TTS 가중치 |
+| TTS_CHECKPOINT_CACHE_PATH | /tmp/jeju_vits.pth | TTS cache |
+| VITS_ROOT | /opt/vits (Docker) | VITS runtime |
+| TTS_MAX_CHARS, TTS_PAUSE_MS, TTS_TAIL_SILENCE_MS | 45, 220, 350 | 분할·무음 |
+| TTS_LENGTH_SCALE, TTS_NOISE_SCALE, TTS_NOISE_SCALE_W, TTS_SEED | 1.10, 0.667, 0.35, 1234 | 합성값 |
+| RAG_CORPUS, RAG_TOP_K, RAG_DISTANCE_THRESHOLD | 빈 값, 3, 0.25 | 선택 검색 |
+| DATASET_BUCKET | malmoi-jeju-dataset-2026 | GCS bucket |
+| DATASET_AUDIO_PREFIX, DATASET_TEXT_PREFIX | dataset/extracted/Audio, dataset/extracted/Text | 음성·라벨 경로 |
+| DATASET_FIRESTORE_COLLECTION | dataset_samples | Firestore collection |
 
-핵심 값:
+## API 및 데이터 흐름
 
-```bash
-GCP_PROJECT_ID=385248657749
-GCP_LOCATION=us-central1
-GEMINI_TUNED_ENDPOINT=projects/385248657749/locations/us-central1/endpoints/7571681821318971392
-LORA_MODEL_PATH=gs://malmoi-jeju-dataset-2026/whisper-model-weights/whisper-jeju-lora-final
-LORA_MODEL_CACHE_PATH=/tmp/whisper-jeju-lora-final
-TTS_CHECKPOINT_PATH=gs://malmoi-jeju-dataset-2026/tts/jeju_vits.pth
-```
+| Method | 경로 | 동작 |
+|---|---|---|
+| GET | /health | 장치와 모델 상태 |
+| POST | /translate | multipart file/history, JSON 결과 |
+| POST | /tts | JSON text, raw audio/wav |
+| GET | /dataset/stats | Firestore 전체·상태별 수 |
+| GET | /dataset/samples?limit=20&offset=0 | 샘플 페이지, limit 최대 100 |
+| GET | /dataset/audio/{sample_id} | GCS WAV |
+| PATCH | /dataset/samples/{sample_id} | approved/rejected 및 선택 라벨 수정 |
 
-실제 Gemini tuned endpoint가 바뀌면 환경변수만 수정하면 됩니다.
+응답은 전사, 번역, 답변, Base64 WAV, sample rate, 처리 시간을 포함합니다. 오디오·라벨은 GCS에 저장하고 metadata는 Firestore에 기록합니다. STT와 번역 confidence가 모두 0.8 이상이면 상태는 approved, 아니면 pending입니다.
 
-## 로컬 Docker 실행
+## 디렉터리 구조
 
-먼저 가중치를 넣습니다.
-
-```text
-models/tts/jeju_vits.pth
-```
-
-빌드:
-
-```bash
-docker build -t korean-heritage-api .
-```
-
-Google Cloud ADC가 설정된 개발 환경이라면 필요한 credential을 전달해 실행합니다. Cloud Run에서는 배포 서비스 계정의 Vertex AI 권한을 사용합니다.
-
-```bash
-docker run --rm -p 8080:8080 \
-  -e GCP_PROJECT_ID=385248657749 \
-  -e GCP_LOCATION=us-central1 \
-  -e GEMINI_TUNED_ENDPOINT=projects/385248657749/locations/us-central1/endpoints/7571681821318971392 \
-  -e TTS_CHECKPOINT_PATH=gs://malmoi-jeju-dataset-2026/tts/jeju_vits.pth \
-  korean-heritage-api
-```
-
-## Cloud Run 배포 시 참고
-
-STT + VITS를 같은 요청에서 순차 실행하므로 데모에서는 **instance concurrency=1**을 권장합니다.
-
-`requirements.txt`는 CUDA 지원 PyTorch 빌드를 설치합니다. Cloud Run 인스턴스에 GPU가 붙어 있으면
-`torch.cuda.is_available()`이 `True`가 되어 STT(Whisper)/TTS(VITS) 모델이 자동으로 GPU를 사용하고,
-GPU가 없으면 자동으로 CPU로 동작합니다(`api_server.py`의 `DEVICE` 분기 참고).
-
-## 프로젝트 구조
-
-```text
+~~~text
 .
 ├── api_server.py
 ├── ars_prompt.py
-├── tts_engine.py
-├── tts_config/
-│   └── jeju_vits.json
-├── models/
-│   └── tts/
-│       ├── README.md
-│       └── jeju_vits.pth       # 사용자가 추가
+├── dataset_logger.py
+├── dataset_dashboard.py
 ├── gcs_model_loader.py
+├── tts_engine.py
+├── tts_config/jeju_vits.json
+├── models/tts/README.md
+├── whisper-jeju-lora-final/README.md
+├── tests/
 ├── requirements.txt
-├── Dockerfile
-├── .dockerignore
-└── .env.example
-```
+└── Dockerfile
+~~~
 
-## Gemini SDK
+## 학습 및 평가 지표
 
-이 서버는 `google-genai` SDK를 사용하여 Vertex AI의 tuned Gemini endpoint를 호출합니다. 시스템 지시문과 Few-Shot turn을 함께 보내고 structured JSON response를 요청합니다.
+Confidence는 데이터 초기 상태 분류 기준이지 모델 성능 점수가 아닙니다. 발표 자료는 카카오브레인 제주어 200개 샘플 기준 평가를 기재했지만 수치 점수와 재현 코드가 없습니다. WER·BLEU 승격 조건은 [학습 저장소](https://github.com/sunghopp/Korean-Heritage-FLYWHEEL-TRAIN)에서 관리합니다.
 
-## VITS runtime
+## 주의사항
 
-TTS 구조는 원본 `jaywalnut310/vits`를 사용합니다. Dockerfile에서 upstream commit `2e561ba`로 고정하며, 학습된 `G_*.pth`는 별도 모델 artifact입니다.
-
-## TTS 가중치: Google Cloud Storage 로딩
-
-TTS Generator 가중치는 GitHub/Docker 이미지에 포함하지 않고 아래 GCS 객체를 사용합니다.
-
-```text
-gs://malmoi-jeju-dataset-2026/tts/jeju_vits.pth
-```
-
-API 프로세스가 시작되면 `tts_engine.py`가 해당 객체를 아래 임시 경로로 한 번 다운로드한 뒤 VITS 모델을 적재합니다.
-
-```text
-/tmp/jeju_vits.pth
-```
-
-기본 환경변수:
-
-```bash
-TTS_CHECKPOINT_PATH=gs://malmoi-jeju-dataset-2026/tts/jeju_vits.pth
-TTS_CHECKPOINT_CACHE_PATH=/tmp/jeju_vits.pth
-```
-
-Cloud Run에서 사용하는 런타임 서비스 계정에는 버킷의 해당 객체를 읽을 수 있는 권한(`storage.objects.get`, 일반적으로 Storage Object Viewer 역할)이 필요합니다.
-
-## STT LoRA 가중치: Google Cloud Storage 로딩
-
-STT LoRA 가중치는 로컬 저장소나 Docker 이미지에 포함하지 않고 아래 GCS prefix에서 시작 시 로드합니다.
-
-```text
-gs://malmoi-jeju-dataset-2026/whisper-model-weights/whisper-jeju-lora-final
-```
-
-프로세스 시작 시 prefix 아래 파일을 `/tmp/whisper-jeju-lora-final`에 다운로드한 뒤 PEFT 모델을 적재합니다. Cloud Run 서비스 계정에는 해당 prefix의 객체를 읽을 수 있는 `storage.objects.get` 권한(일반적으로 Storage Object Viewer)이 필요합니다. 로컬 테스트에서 다른 경로를 사용하려면 `LORA_MODEL_PATH`에 로컬 디렉터리 또는 다른 `gs://` prefix를 지정할 수 있습니다.
-
-## 학습 데이터셋 자동 저장: Google Cloud Storage 업로드
-
-`POST /translate` 요청마다 사용자 발화 음성과 STT/번역 결과를 이후 모델 재학습용 데이터셋으로 GCS에 적재합니다 (`dataset_logger.py`).
-
-```text
-gs://malmoi-jeju-dataset-2026/dataset/extracted/Audio/{id}.wav
-gs://malmoi-jeju-dataset-2026/dataset/extracted/Text/{tier}/{id}.json
-```
-
-`{id}`는 요청마다 새로 생성되는 타임스탬프+랜덤 hex 키이며, 오디오/라벨 파일이 1:1로 짝지어집니다. **오디오는 티어 구분 없이 항상 평탄한 경로**에 저장되고, **라벨(Text)만 티어별 폴더**로 나뉩니다. 라벨 파일은 JSON 객체 하나로, 참조 데이터셋(`extracted/extracted/Text/Text/Label/*.json`)의 `utterance` 레벨 필드명(`form`, `standard_form`, `dialect_form`, `speaker_id`, `note`)을 재사용하고, 어절(공백 기준 단어) 단위로 쪼갠 `eojeolList`도 함께 담습니다.
-
-`eojeolList`는 `jeju_text`(방언 원문)와 `standard_text`(Gemini가 생성한 문장 전체 표준어 번역)를 각각 공백 기준으로 어절 분리한 뒤 같은 순서로 위치 매칭한 것입니다. Gemini로부터 실제 어절 단위 정렬을 받지 않기 때문에 나온 휴리스틱으로, 두 문장의 어절 수가 다르면(조사 추가/삭제 등) 부정확할 수 있습니다 — 표준어 쪽 어절이 모자라면 `standard`/`isDialect`는 `null`로 남습니다.
-
-### Tier(고정) × Review Status(검수 워크플로) 이중 분류
-
-`tier`와 `review_status`는 서로 독립된 필드입니다. **`tier`는 최초 저장 시 confidence로 한 번 정해지면 이후 절대 바뀌지 않고**, 라벨이 저장되는 `{tier}` 폴더도 이 값을 그대로 씁니다(`dataset_logger._compute_tier`):
-
-| confidence | tier | 의미 |
-|---|---|---|
-| `>= 0.8` | `tier1` | 신뢰도 높음 |
-| `0.6 <= confidence < 0.8` | `tier2` | 관찰 필요 |
-| `< 0.6` | `tier3` | 신뢰도 낮음 |
-
-**`review_status`는 사람의 검수 워크플로에 따라 바뀌는 값**이며, 파일 경로에는 반영되지 않고(파일 이동 없음) JSON 필드로만 관리됩니다(`dataset_logger._initial_review_status`, `dataset_dashboard.update_sample_label`):
-
-| review_status | 의미 |
-|---|---|
-| `not_required` | Tier1의 최초 상태 — 검수 불필요 |
-| `unreviewed` | Tier2/3의 최초 상태 — 검수 대기 |
-| `human_verified` | 사람이 직접 검수(필요시 라벨 수정)한 상태 |
-| `rejected` | 사람이 검수 후 저품질로 판단해 학습에서 제외한 상태 |
-
-`human_verified`/`rejected`는 `PATCH /dataset/samples/{tier}/{sample_id}`로만 설정할 수 있습니다. 학습 스크립트에서 검수된 데이터만 골라 쓰고 싶다면, 파일 경로가 아니라 각 레코드의 `review_status` 필드를 확인해 필터링하면 됩니다(예: `not_required`/`human_verified`만 포함, `unreviewed`/`rejected`는 제외).
-
-라벨 JSON에는 `confidence`(0~1 소수, 소수점 4자리 반올림), `tier`, `review_status` 필드가 함께 저장됩니다.
-
-기본 환경변수:
-
-```bash
-DATASET_BUCKET=malmoi-jeju-dataset-2026
-DATASET_AUDIO_PREFIX=dataset/extracted/Audio
-DATASET_TEXT_PREFIX=dataset/extracted/Text
-```
-
-이 저장은 부가 기능(best-effort)입니다 — 업로드가 실패해도 `/translate` 응답(STT/Gemini/TTS 결과)에는 영향을 주지 않고 서버 로그에 warning만 남습니다.
+- translate, tts, 데이터셋 API에는 인증·권한 검사가 없습니다. 공개 배포 전 데이터 조회와 수정 권한을 제한해야 합니다.
+- CORS 기본값은 전체 origin 허용입니다. 운영 시 제한하세요.
+- GCS·Firestore 권한이 필요하며 RAG를 켤 경우 corpus 접근 권한도 필요합니다.
+- TTS 적재가 실패하면 서버는 진단용으로 시작할 수 있지만 TTS 응답은 실패합니다.
+- 추론 직렬화와 모델 메모리를 고려해 Cloud Run 동시성을 설정하세요.
